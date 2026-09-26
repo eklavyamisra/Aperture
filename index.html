@@ -3,38 +3,241 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+    <title>Aperture — An Index of Light</title>
+    <meta name="description" content="Aperture is an editorial search engine for photography, powered by the Unsplash community.">
+    <meta name="theme-color" content="#0d0c0a">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preconnect" href="https://api.unsplash.com">
+    <link rel="preconnect" href="https://images.unsplash.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
-<body>
-    <h1>Image Search App</h1>
-    <form action="">
-        <input type="text" id="search-input" placeholder="search for Image">
-        <button id="search-button">search</button>
-    </form>
-    <div class="search-results">
-        <div class="search-result">
-            <img src="https://plus.unsplash.com/premium_photo-1693881702158-092b00136f76?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=crop&w=1374&q=80" 
-            alt="bat" >
-            <a href="https://unsplash.com/photos/a-large-group-of-orange-pieces-of-plastic-45bIgExVXpw"
-            target="_blank">bat</a>
+<body class="is-loading">
+
+    <!-- ============ PRELOADER ============ -->
+    <div id="loader" aria-hidden="true">
+        <div class="loader-row mono">
+            <span>APERTURE®</span>
+            <span>DEVELOPING NEGATIVES</span>
         </div>
-        <div class="search-result">
-            <img src="https://plus.unsplash.com/premium_photo-1693881702158-092b00136f76?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=crop&w=1374&q=80" 
-            alt="bat" >
-            <a href="https://unsplash.com/photos/a-large-group-of-orange-pieces-of-plastic-45bIgExVXpw"
-            target="_blank">bat</a>
+        <div class="loader-count">
+            <span id="loader-num">0</span>
         </div>
-        <div class="search-result">
-            <img src="https://plus.unsplash.com/premium_photo-1693881702158-092b00136f76?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=crop&w=1374&q=80" 
-            alt="bat" >
-            <a href="https://unsplash.com/photos/a-large-group-of-orange-pieces-of-plastic-45bIgExVXpw"
-            target="_blank">bat</a>
+        <div class="loader-row mono">
+            <span>ƒ/1.4 — 1/250s — ISO 200</span>
+            <span id="loader-status">CONNECTING</span>
         </div>
+        <div class="loader-bar"><i id="loader-bar"></i></div>
     </div>
 
-    <button id="show-more-button">show more</button>
-    
+    <!-- ============ CHROME ============ -->
+    <div class="grain" aria-hidden="true"></div>
+    <div id="cursor" aria-hidden="true"><span class="cursor-label"></span></div>
+
+    <header id="nav">
+        <a href="./" class="logo" data-cursor="Home">Aperture<sup>®</sup></a>
+        <div class="nav-hud mono">
+            <span class="hud-dot"></span>
+            <span id="hud-mode">EDITORIAL FEED</span>
+            <span class="hud-sep">/</span>
+            <span><b id="hud-count">000</b> FRAMES</span>
+            <span class="hud-sep hud-rate-wrap" hidden>/</span>
+            <span class="hud-rate-wrap" hidden>API <b id="hud-rate">--</b></span>
+        </div>
+        <a class="nav-credit mono magnetic" href="https://unsplash.com/?utm_source=aperture&utm_medium=referral" target="_blank" rel="noopener" data-cursor="Visit">
+            Powered by Unsplash ↗
+        </a>
+    </header>
+
+    <main id="top">
+        <!-- ============ HERO ============ -->
+        <section class="hero">
+            <div class="hero-float" aria-hidden="true">
+                <figure class="float f1" data-depth="0.9"><img alt=""></figure>
+                <figure class="float f2" data-depth="0.5"><img alt=""></figure>
+                <figure class="float f3" data-depth="1.3"><img alt=""></figure>
+                <figure class="float f4" data-depth="0.7"><img alt=""></figure>
+                <figure class="float f5" data-depth="1.1"><img alt=""></figure>
+            </div>
+
+            <div class="hero-meta mono">
+                <span>(N° 001)</span>
+                <span>A search engine for<br>the photographic</span>
+                <span>Est. 2026<br>Worldwide</span>
+            </div>
+
+            <h1 class="hero-title">
+                <span class="line"><span>An index of</span></span>
+                <span class="line"><span><em>the world’s</em></span></span>
+                <span class="line"><span>light.</span></span>
+            </h1>
+
+            <form class="search search--hero js-search" role="search" autocomplete="off">
+                <label for="hero-q" class="search-label mono">Search 5,000,000+ free photographs</label>
+                <div class="search-field">
+                    <input id="hero-q" name="q" type="search" placeholder="Tokyo at night, brutalism, film grain…" enterkeyhint="search">
+                    <kbd class="mono" aria-hidden="true">/</kbd>
+                    <button type="submit" class="search-go magnetic" aria-label="Search" data-cursor="Go">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
+                    </button>
+                </div>
+                <div class="chips">
+                    <span class="mono chips-label">Try —</span>
+                    <button type="button" class="chip" data-q="Brutalism">Brutalism</button>
+                    <button type="button" class="chip" data-q="Tokyo night">Tokyo night</button>
+                    <button type="button" class="chip" data-q="Film grain">Film grain</button>
+                    <button type="button" class="chip" data-q="Iceland">Iceland</button>
+                    <button type="button" class="chip" data-q="Still life">Still life</button>
+                </div>
+            </form>
+
+            <div class="hero-foot mono">
+                <span>Scroll to develop</span>
+                <span class="hero-foot-line"><i></i></span>
+                <span id="hero-credit">&nbsp;</span>
+            </div>
+        </section>
+
+        <!-- ============ MARQUEE ============ -->
+        <div class="marquee" aria-label="Topics">
+            <div class="marquee-track">
+                <div class="marquee-group">
+                    <button data-q="Architecture">Architecture</button><i>✦</i>
+                    <button data-q="Portrait"><em>Portrait</em></button><i>✦</i>
+                    <button data-q="Desert">Desert</button><i>✦</i>
+                    <button data-q="Minimal"><em>Minimal</em></button><i>✦</i>
+                    <button data-q="Ocean">Ocean</button><i>✦</i>
+                    <button data-q="Street photography"><em>Street</em></button><i>✦</i>
+                    <button data-q="Botanical">Botanical</button><i>✦</i>
+                    <button data-q="Neon"><em>Neon</em></button><i>✦</i>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ RESULTS ============ -->
+        <section class="results" id="results" aria-live="polite">
+            <header class="results-head">
+                <div class="results-kicker mono">
+                    <span id="results-kicker">(Today’s selection)</span>
+                    <span id="results-total"></span>
+                </div>
+                <h2 class="results-title" id="results-title"><span>Editorial</span></h2>
+
+                <div class="filters" id="filters" hidden>
+                    <div class="filter-group" role="radiogroup" aria-label="Sort order">
+                        <span class="mono filter-label">Sort</span>
+                        <button class="toggle is-active" data-order="relevant" role="radio" aria-checked="true">Relevant</button>
+                        <button class="toggle" data-order="latest" role="radio" aria-checked="false">Latest</button>
+                    </div>
+                    <div class="filter-group" role="radiogroup" aria-label="Colour">
+                        <span class="mono filter-label">Tone</span>
+                        <button class="swatch is-active" data-color="" role="radio" aria-checked="true" aria-label="Any colour" data-cursor="Any"></button>
+                        <button class="swatch" data-color="black_and_white" role="radio" aria-checked="false" aria-label="Black and white" data-cursor="B&amp;W" style="--s: linear-gradient(90deg,#111 50%,#eee 50%)"></button>
+                        <button class="swatch" data-color="red" role="radio" aria-checked="false" aria-label="Red" data-cursor="Red" style="--s:#c7372f"></button>
+                        <button class="swatch" data-color="orange" role="radio" aria-checked="false" aria-label="Orange" data-cursor="Orange" style="--s:#e07b26"></button>
+                        <button class="swatch" data-color="yellow" role="radio" aria-checked="false" aria-label="Yellow" data-cursor="Yellow" style="--s:#e8c53a"></button>
+                        <button class="swatch" data-color="green" role="radio" aria-checked="false" aria-label="Green" data-cursor="Green" style="--s:#3f8a4f"></button>
+                        <button class="swatch" data-color="teal" role="radio" aria-checked="false" aria-label="Teal" data-cursor="Teal" style="--s:#2a8c8c"></button>
+                        <button class="swatch" data-color="blue" role="radio" aria-checked="false" aria-label="Blue" data-cursor="Blue" style="--s:#2f5fc7"></button>
+                        <button class="swatch" data-color="purple" role="radio" aria-checked="false" aria-label="Purple" data-cursor="Purple" style="--s:#7a45c2"></button>
+                    </div>
+                </div>
+            </header>
+
+            <div class="grid" id="grid"></div>
+
+            <div class="grid-state" id="grid-state" hidden></div>
+
+            <div class="grid-foot">
+                <div id="sentinel" aria-hidden="true"></div>
+                <button id="show-more-button" class="more magnetic" data-cursor="More" hidden>
+                    <span class="more-label">Load more frames</span>
+                    <span class="more-count mono" id="more-count"></span>
+                </button>
+            </div>
+        </section>
+    </main>
+
+    <!-- ============ DOCK ============ -->
+    <div class="dock" id="dock">
+        <form class="search search--dock js-search" role="search" autocomplete="off">
+            <label for="dock-q" class="sr-only">Search photos</label>
+            <svg class="dock-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+            <input id="dock-q" name="q" type="search" placeholder="Search again…" enterkeyhint="search">
+        </form>
+        <div class="dock-density" role="radiogroup" aria-label="Grid density">
+            <button data-density="2" role="radio" aria-checked="false" aria-label="2 columns" data-cursor="Large">
+                <svg viewBox="0 0 16 16"><rect x="1" y="1" width="6" height="14"/><rect x="9" y="1" width="6" height="14"/></svg>
+            </button>
+            <button data-density="3" role="radio" aria-checked="true" class="is-active" aria-label="3 columns" data-cursor="Medium">
+                <svg viewBox="0 0 16 16"><rect x="1" y="1" width="3.6" height="14"/><rect x="6.2" y="1" width="3.6" height="14"/><rect x="11.4" y="1" width="3.6" height="14"/></svg>
+            </button>
+            <button data-density="4" role="radio" aria-checked="false" aria-label="4 columns" data-cursor="Small">
+                <svg viewBox="0 0 16 16"><rect x="1" y="1" width="2.5" height="14"/><rect x="4.8" y="1" width="2.5" height="14"/><rect x="8.6" y="1" width="2.5" height="14"/><rect x="12.4" y="1" width="2.5" height="14"/></svg>
+            </button>
+        </div>
+        <button class="dock-top" id="dock-top" aria-label="Back to top" data-cursor="Top">
+            <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+        </button>
+    </div>
+
+    <!-- ============ LIGHTBOX ============ -->
+    <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-labelledby="lb-title" data-lenis-prevent hidden>
+        <div class="lb-bg"></div>
+        <div class="lb-stage" id="lb-stage">
+            <img class="lb-img" id="lb-img" alt="">
+            <button class="lb-nav lb-prev" id="lb-prev" aria-label="Previous photo" data-cursor="Prev"></button>
+            <button class="lb-nav lb-next" id="lb-next" aria-label="Next photo" data-cursor="Next"></button>
+        </div>
+        <aside class="lb-panel">
+            <div class="lb-top mono">
+                <span id="lb-index">001 / 030</span>
+                <button class="lb-close" id="lb-close" aria-label="Close" data-cursor="Close">Close <span aria-hidden="true">✕</span></button>
+            </div>
+            <div class="lb-body">
+                <h3 class="lb-title" id="lb-title"></h3>
+                <a class="lb-author" id="lb-author" target="_blank" rel="noopener" data-cursor="Profile">
+                    <img id="lb-avatar" alt="">
+                    <span><b id="lb-name"></b><small class="mono" id="lb-handle"></small></span>
+                </a>
+                <dl class="lb-meta mono">
+                    <div><dt>Dimensions</dt><dd id="lb-dim"></dd></div>
+                    <div><dt>Dominant</dt><dd><i class="lb-swatch" id="lb-swatch"></i><span id="lb-color"></span></dd></div>
+                    <div><dt>Likes</dt><dd id="lb-likes"></dd></div>
+                    <div><dt>Published</dt><dd id="lb-date"></dd></div>
+                    <div><dt>Based in</dt><dd id="lb-loc"></dd></div>
+                </dl>
+            </div>
+            <div class="lb-actions">
+                <a class="btn btn--solid" id="lb-download" target="_blank" rel="noopener" data-cursor="Save">Download <span aria-hidden="true">↓</span></a>
+                <a class="btn" id="lb-open" target="_blank" rel="noopener" data-cursor="Open">View on Unsplash <span aria-hidden="true">↗</span></a>
+            </div>
+            <p class="lb-hint mono">← → to browse · Esc to close</p>
+        </aside>
+    </div>
+
+    <!-- ============ FOOTER ============ -->
+    <footer class="footer">
+        <div class="footer-top">
+            <p class="footer-lede">Every photograph here was made by a real person, somewhere, <em>paying attention.</em></p>
+            <ul class="footer-links mono">
+                <li><a href="https://unsplash.com/?utm_source=aperture&utm_medium=referral" target="_blank" rel="noopener">Unsplash ↗</a></li>
+                <li><a href="https://unsplash.com/license?utm_source=aperture&utm_medium=referral" target="_blank" rel="noopener">License ↗</a></li>
+                <li><button class="linklike" id="footer-top">Back to top ↑</button></li>
+            </ul>
+        </div>
+        <div class="footer-mark" aria-hidden="true">Aperture</div>
+        <div class="footer-bottom mono">
+            <span>© 2026 Aperture — a study</span>
+            <span>Images via the Unsplash API</span>
+        </div>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/Flip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lenis@1.1.18/dist/lenis.min.js"></script>
     <script src="api.js"></script>
 </body>
 </html>
