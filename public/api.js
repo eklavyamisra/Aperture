@@ -1,8 +1,9 @@
-const accessKey = "LYbwcbJK4e34RLGNmDW4Y10enrnYAqqYzZjHUl0lw5Y";
-const API = "https://api.unsplash.com";
+// All Unsplash calls go through /api/unsplash (see api/unsplash.js): the key
+// stays on the server and the CDN caches responses.
+const PROXY = "/api/unsplash";
 const UTM = "utm_source=aperture&utm_medium=referral";
 const PER_PAGE = 24;
-const AUTO_PAGES = 2; // pages fetched by infinite scroll before we ask (the demo key allows 50 req/hr)
+const AUTO_PAGES = 3; // pages fetched by infinite scroll before we ask
 
 gsap.registerPlugin(ScrollTrigger, Flip);
 
@@ -100,9 +101,9 @@ class ApiError extends Error {
 }
 
 async function api(path, params = {}) {
-    const url = new URL(API + path);
+    const url = new URL(PROXY, location.origin);
+    url.searchParams.set("path", path);
     Object.entries(params).forEach(([k, v]) => v !== "" && v != null && url.searchParams.set(k, v));
-    url.searchParams.set("client_id", accessKey);
 
     let res;
     try {
@@ -113,7 +114,7 @@ async function api(path, params = {}) {
 
     const remaining = res.headers.get("X-Ratelimit-Remaining");
     const limit = res.headers.get("X-Ratelimit-Limit");
-    if (remaining !== null) {
+    if (remaining) {
         q("#hud-rate").textContent = limit ? `${remaining}/${limit}` : remaining;
         qa(".hud-rate-wrap").forEach((el) => (el.hidden = false));
     }
@@ -124,8 +125,8 @@ async function api(path, params = {}) {
 
 function describeError(err) {
     if (err.status === 403 || err.status === 429)
-        return ["Out of film.", "The Unsplash demo key allows 50 requests an hour. Give it a few minutes and try again."];
-    if (err.status === 401) return ["Access denied.", "The Unsplash access key was rejected. Check the key in api.js."];
+        return ["Out of film.", "Aperture is very popular right now. Give it a few minutes and try again."];
+    if (err.status === 401 || err.status === 500) return ["Darkroom closed.", "The server couldn’t talk to Unsplash. Try again shortly."];
     if (err.status === 0) return ["No signal.", "Couldn’t reach Unsplash. Check your connection and try again."];
     return ["Something slipped.", `Unsplash answered with ${err.status || "an error"}. Try again in a moment.`];
 }
@@ -599,11 +600,14 @@ function hideCard(i) {
     if (lb.hidden) lb.hidden.style.visibility = "hidden";
 }
 
-function openLightbox(i) {
+// set by canvas.js while the infinite canvas is open
+const inCanvas = () => !!window.canvasView?.isOpen;
+
+function openLightbox(i, fromRect) {
     if (i < 0 || lb.busy) return;
     const p = state.photos[i];
     const media = state.cards[i].querySelector(".card-media");
-    const from = media.getBoundingClientRect();
+    const from = fromRect || media.getBoundingClientRect();
 
     lb.i = i;
     lb.lastFocus = document.activeElement;
@@ -617,7 +621,7 @@ function openLightbox(i) {
     lbImg.src = thumbSrc(i);
     lbImg.alt = p.alt_description || photoTitle(p);
     const to = fitRect(p);
-    hideCard(i);
+    if (!inCanvas()) hideCard(i);
 
     const mobile = innerWidth < 860;
     const tl = gsap.timeline({
@@ -642,8 +646,9 @@ function openLightbox(i) {
 function closeLightbox() {
     if (lightbox.hidden || lb.busy) return;
     lb.busy = true;
-    const media = state.cards[lb.i]?.querySelector(".card-media");
-    const r = media?.getBoundingClientRect();
+    const canvasOpen = inCanvas();
+    const media = canvasOpen ? null : state.cards[lb.i]?.querySelector(".card-media");
+    const r = canvasOpen ? window.canvasView.rectFor(lb.i) : media?.getBoundingClientRect();
     const onScreen = r && r.bottom > 0 && r.top < innerHeight;
     const mobile = innerWidth < 860;
 
@@ -652,8 +657,10 @@ function closeLightbox() {
         if (lb.hidden) lb.hidden.style.visibility = "";
         lb.hidden = null;
         lb.busy = false;
-        document.body.style.overflow = "";
-        lenis?.start();
+        if (!canvasOpen) {
+            document.body.style.overflow = "";
+            lenis?.start();
+        }
         gsap.set([lbImg, ".lb-bg", ".lb-panel"], { clearProps: "all" });
         (media || lb.lastFocus)?.focus?.({ preventScroll: true });
     };
@@ -693,13 +700,15 @@ async function go(dir) {
 
     // keep the page behind in sync so closing lands on the right card
     const card = state.cards[next];
-    const y = card.getBoundingClientRect().top + (lenis ? lenis.scroll : scrollY) - innerHeight * 0.3;
-    if (lenis) lenis.scrollTo(Math.max(0, y), { immediate: true, force: true });
-    else window.scrollTo(0, Math.max(0, y));
+    if (!inCanvas()) {
+        const y = card.getBoundingClientRect().top + (lenis ? lenis.scroll : scrollY) - innerHeight * 0.3;
+        if (lenis) lenis.scrollTo(Math.max(0, y), { immediate: true, force: true });
+        else window.scrollTo(0, Math.max(0, y));
+    }
 
     const finish = () => {
         lb.i = next;
-        hideCard(next);
+        if (!inCanvas()) hideCard(next);
         fillPanel(p);
         lbImg.src = thumbSrc(next);
         lbImg.alt = p.alt_description || photoTitle(p);
@@ -730,7 +739,11 @@ q(".lb-bg").addEventListener("click", closeLightbox);
 // Unsplash asks apps to ping download_location whenever a photo is downloaded
 q("#lb-download").addEventListener("click", (e) => {
     const track = e.currentTarget.dataset.track;
-    if (track) fetch(`${track}${track.includes("?") ? "&" : "?"}client_id=${accessKey}`).catch(() => {});
+    if (!track) return;
+    try {
+        const u = new URL(track);
+        api(u.pathname, { ixid: u.searchParams.get("ixid") }).catch(() => {});
+    } catch (err) {}
 });
 
 /* swipe on touch */
@@ -756,7 +769,7 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "/" && !typing) {
         e.preventDefault();
         const heroVisible = q(".hero").getBoundingClientRect().bottom > innerHeight * 0.4;
-        q(heroVisible ? "#hero-q" : "#dock-q").focus({ preventScroll: true });
+        q(inCanvas() ? "#cv-q" : heroVisible ? "#hero-q" : "#dock-q").focus({ preventScroll: true });
     }
 });
 

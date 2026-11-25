@@ -6,6 +6,17 @@
     <title>Aperture — An Index of Light</title>
     <meta name="description" content="Aperture is an editorial search engine for photography, powered by the Unsplash community.">
     <meta name="theme-color" content="#0d0c0a">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <!-- link previews (WhatsApp / Instagram / X). Replace SITE_URL after the first deploy. -->
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Aperture">
+    <meta property="og:title" content="Aperture — An Index of Light">
+    <meta property="og:description" content="Search 5,000,000+ free photographs, then step into an infinite canvas of them.">
+    <meta property="og:image" content="SITE_URL/og.jpg">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:image" content="SITE_URL/og.jpg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://api.unsplash.com">
@@ -120,7 +131,13 @@
             <header class="results-head">
                 <div class="results-kicker mono">
                     <span id="results-kicker">(Today’s selection)</span>
-                    <span id="results-total"></span>
+                    <span class="results-kicker-r">
+                        <span id="results-total"></span>
+                        <button class="cv-enter magnetic" data-open-canvas data-cursor="Enter">
+                            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1" y="1" width="4" height="5"/><rect x="6" y="3" width="4" height="5"/><rect x="11" y="1" width="4" height="5"/><rect x="1" y="8" width="4" height="7"/><rect x="6" y="10" width="4" height="5"/><rect x="11" y="8" width="4" height="7"/></svg>
+                            Enter the canvas
+                        </button>
+                    </span>
                 </div>
                 <h2 class="results-title" id="results-title"><span>Editorial</span></h2>
 
@@ -177,9 +194,32 @@
                 <svg viewBox="0 0 16 16"><rect x="1" y="1" width="2.5" height="14"/><rect x="4.8" y="1" width="2.5" height="14"/><rect x="8.6" y="1" width="2.5" height="14"/><rect x="12.4" y="1" width="2.5" height="14"/></svg>
             </button>
         </div>
+        <button class="dock-canvas" data-open-canvas aria-label="Open infinite canvas" data-cursor="Canvas">
+            <svg viewBox="0 0 16 16"><rect x="1" y="1" width="4" height="5"/><rect x="6" y="3" width="4" height="5"/><rect x="11" y="1" width="4" height="5"/><rect x="1" y="8" width="4" height="7"/><rect x="6" y="10" width="4" height="5"/><rect x="11" y="8" width="4" height="7"/></svg>
+        </button>
         <button class="dock-top" id="dock-top" aria-label="Back to top" data-cursor="Top">
             <svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
         </button>
+    </div>
+
+    <!-- ============ INFINITE CANVAS ============ -->
+    <div class="cv" id="cv" role="region" aria-label="Infinite canvas of photos" data-lenis-prevent hidden>
+        <canvas id="cv-gl" aria-hidden="true"></canvas>
+        <div class="cv-bar">
+            <span class="cv-brand">Aperture<sup>®</sup> <em>canvas</em></span>
+            <form class="cv-search js-search" role="search" autocomplete="off">
+                <label for="cv-q" class="sr-only">Search photos</label>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+                <input id="cv-q" name="q" type="search" placeholder="Search the wall…" enterkeyhint="search">
+            </form>
+            <button class="cv-close mono" id="cv-close" data-cursor="Grid">Grid <span aria-hidden="true">✕</span></button>
+        </div>
+        <h2 class="cv-title" id="cv-title" aria-hidden="true"></h2>
+        <div class="cv-foot mono">
+            <span class="cv-cap" id="cv-cap">&nbsp;</span>
+            <span class="cv-hint">Drag · Scroll · Click a frame</span>
+            <span class="cv-xy" id="cv-xy">X 0000 · Y 0000</span>
+        </div>
     </div>
 
     <!-- ============ LIGHTBOX ============ -->
@@ -239,5 +279,6 @@
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/Flip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lenis@1.1.18/dist/lenis.min.js"></script>
     <script src="api.js"></script>
+    <script src="canvas.js"></script>
 </body>
 </html>
