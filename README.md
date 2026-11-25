@@ -23,7 +23,7 @@ npx vercel env add UNSPLASH_ACCESS_KEY production
 npx vercel --prod
 ```
 
-Then replace `SITE_URL` in `public/index.html` (og:image / twitter:image) with the live URL and redeploy.
+Live: https://aperture-bice-nine.vercel.app  (the root index.html only redirects the old GitHub Pages URL there).
 
 ## After the first deploy
 
