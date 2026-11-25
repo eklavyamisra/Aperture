@@ -1678,3 +1678,22 @@ input[type="search"]::-webkit-search-cancel-button {
 .cv-title {
     z-index: 1;
 }
+
+/* Unsplash attribution line: "Photo by <name> on Unsplash" */
+.lb-credit {
+    font-size: 14px;
+    color: var(--muted);
+    margin: -6px 0 22px;
+}
+
+.lb-credit a {
+    color: var(--ink);
+    text-decoration: underline;
+    text-decoration-color: var(--line);
+    text-underline-offset: 3px;
+    transition: text-decoration-color 0.3s;
+}
+
+.lb-credit a:hover {
+    text-decoration-color: var(--accent);
+}

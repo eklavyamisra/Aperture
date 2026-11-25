@@ -560,6 +560,8 @@ function fillPanel(p) {
     q("#lb-author").href = utm(user.links?.html || "https://unsplash.com");
     q("#lb-avatar").src = user.profile_image?.medium || "";
     q("#lb-name").textContent = user.name || "Unknown";
+    q("#lb-credit-name").textContent = user.name || "Unknown";
+    q("#lb-credit-name").href = utm(user.links?.html || "https://unsplash.com");
     q("#lb-handle").textContent = user.username ? `@${user.username}` : "";
     q("#lb-dim").textContent = `${fmt(p.width)} × ${fmt(p.height)}`;
     q("#lb-color").textContent = (p.color || "—").toUpperCase();
