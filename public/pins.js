@@ -1,11 +1,12 @@
 /* ==========================================================
    APERTURE — pin boards
-   Pins live in named boards kept in localStorage, so a frame you pin on the
-   wall (hover + P, or "Pin" in the viewer) lands on the active board and is
-   still there next visit. A board is a corkboard overlay on the canvas: pan
-   and zoom it, drag polaroids anywhere, group them in frames, tie labelled
-   threads between pins, undo, share as a link, save as PNG or JSON.
-   Relies on globals from api.js: state, lb, lightbox, q, gsap, reduceMotion.
+   Named boards kept in localStorage (uploaded images in IndexedDB via
+   media.js). A board is an infinite corkboard over the canvas holding four
+   kinds of item: Unsplash photos, your own uploads, links / image URLs and
+   notes. Pan and zoom it, drag things anywhere (with snapping), select many,
+   align and group them, tie labelled threads between pins, find, palette,
+   minimap, undo, share as a link, save as PNG or JSON.
+   Relies on globals from api.js: state, lb, lightbox, q, gsap, reduceMotion, api.
 ========================================================== */
 (() => {
     const IMG_HOST = /^https:\/\/images\.unsplash\.com\//;
@@ -14,6 +15,7 @@
     const bkey = (id) => `aperture:board:${id}`;
     const vkey = (id) => `aperture:board-view:${id}`;
     const LEGACY = { pins: "aperture:pins", threads: "aperture:threads", view: "aperture:board-view" };
+    const MEDIA_LAST = "aperture:media-last";
     const ZMIN = 0.2;
     const ZMAX = 2;
     const CARD_W = 200;
@@ -22,6 +24,33 @@
     const clamp = gsap.utils.clamp;
     const clampZ = (z) => clamp(ZMIN, ZMAX, z);
     const listeners = new Set();
+    const KINDS = ["unsplash", "upload", "link", "note"];
+    const TINTS = ["sun", "rose", "sky", "mint", "paper"];
+    const TINT_HEX = { sun: "#f3dc8c", rose: "#f1bcb2", sky: "#bcd5ee", mint: "#c3e4cf", paper: "#ece7dc" };
+    const rnd = () => Math.round((Math.random() * 2 - 1) * 40) / 10;
+
+    /* ---------- toasts ---------- */
+    const toastEl = document.getElementById("toast");
+    let toastT = 0;
+    function toast(msg, tone = "") {
+        if (!toastEl) return;
+        toastEl.textContent = msg;
+        toastEl.dataset.tone = tone;
+        toastEl.classList.add("is-on");
+        clearTimeout(toastT);
+        toastT = setTimeout(() => toastEl.classList.remove("is-on"), tone === "warn" ? 6500 : 3200);
+    }
+    window.toast = toast;
+
+    /* ---------- storage (+ quota warnings) ---------- */
+    let lastFull = 0;
+    function storageFull(err) {
+        const now = Date.now();
+        if (now - lastFull < 30000) return;
+        lastFull = now;
+        toast("Browser storage is full, so your last change wasn't saved. Export this board (Export → Board file) or remove some items.", "warn");
+        window.reportProblem?.("localStorage full", err);
+    }
 
     const store = {
         get(k) {
@@ -36,6 +65,7 @@
                 localStorage.setItem(k, JSON.stringify(v));
                 return true;
             } catch (e) {
+                if (e && (e.name === "QuotaExceededError" || e.name === "NS_ERROR_DOM_QUOTA_REACHED" || e.code === 22)) storageFull(e);
                 return false;
             }
         },
@@ -46,23 +76,72 @@
         },
     };
 
+    // warn once a session, before saves start failing
+    let usageWarned = false;
+    let usageT = 0;
+    function checkUsage() {
+        clearTimeout(usageT);
+        usageT = setTimeout(async () => {
+            if (usageWarned) return;
+            let chars = 0;
+            try {
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    chars += k.length + (localStorage.getItem(k) || "").length;
+                }
+            } catch (e) {
+                return;
+            }
+            if (chars > 2.4e6) {
+                usageWarned = true;
+                return toast("Your boards are close to the browser's storage limit. Export big boards (Export → Board file) to keep a copy.", "warn");
+            }
+            const est = await window.media?.estimate?.();
+            if (est && est.quota && est.used / est.quota > 0.9) {
+                usageWarned = true;
+                toast("Image storage is almost full. Remove some uploads, or export boards to keep copies.", "warn");
+            }
+        }, 2000);
+    }
+
     const uid = () => Math.random().toString(36).slice(2, 10);
+    const newId = (p) => `${p}-${uid()}${uid().slice(0, 4)}`;
     const ID_RE = /^[a-z0-9]{1,20}$/;
     const PHOTO_ID = /^[A-Za-z0-9_-]{1,40}$/;
+    const ITEM_ID = /^[uln]-[a-z0-9]{6,24}$/;
     const str = (v, n) => String(v ?? "").slice(0, n);
     const fin = (v) => (Number.isFinite(v) ? v : null);
     const tkey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+    const hostOf = (u) => {
+        try {
+            return new URL(u).hostname.replace(/^www\./, "");
+        } catch (e) {
+            return "link";
+        }
+    };
 
     /* ---------- sanitising (storage, imports and share links all pass through here) ---------- */
     const okLink = (u, fb) => (typeof u === "string" && /^https:\/\/unsplash\.com\//.test(u) ? u : fb);
-    const validPin = (x) =>
-        !!x && !!x.photo && typeof x.photo.id === "string" && PHOTO_ID.test(x.photo.id) && typeof x.photo.urls?.raw === "string" && IMG_HOST.test(x.photo.urls.raw);
+    const hexOr = (c, fb = "#2a2723") => (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c || "") ? c : fb);
+    const posInt = (n) => (Number.isFinite(+n) && +n > 0 ? Math.min(20000, Math.round(+n)) : 0);
+    function safeUrl(u, httpsOnly) {
+        if (typeof u !== "string" || !u.trim() || u.length > 2000) return null;
+        try {
+            const url = new URL(u.trim());
+            if (url.protocol !== "https:" && (httpsOnly || url.protocol !== "http:")) return null;
+            if (url.username || url.password) return null;
+            return url.href;
+        } catch (e) {
+            return null;
+        }
+    }
+    const validPhoto = (p) => !!p && typeof p.id === "string" && PHOTO_ID.test(p.id) && typeof p.urls?.raw === "string" && IMG_HOST.test(p.urls.raw);
 
     function snap(p) {
         const username = PHOTO_ID.test(p.user?.username || "") ? p.user.username : "";
         return {
             id: p.id,
-            color: /^#[0-9a-fA-F]{3,8}$/.test(p.color || "") ? p.color : "#222222",
+            color: hexOr(p.color, "#222222"),
             width: Number(p.width) || 0,
             height: Number(p.height) || 0,
             alt_description: str(p.alt_description, 300),
@@ -77,17 +156,32 @@
         };
     }
 
-    const cleanPin = (x) => ({
-        photo: snap(x.photo),
-        note: str(x.note, 280),
-        query: str(x.query, 120),
-        at: Number(x.at) || Date.now(),
-        x: fin(x.x),
-        y: fin(x.y),
-        bx: fin(x.bx),
-        by: fin(x.by),
-        r: clamp(-6, 6, Number(x.r) || 0),
-    });
+    function cleanItem(x) {
+        if (!x || typeof x !== "object") return null;
+        const kind = KINDS.includes(x.kind) ? x.kind : x.photo ? "unsplash" : null;
+        if (!kind) return null;
+        const base = {
+            note: str(x.note, kind === "note" ? 1000 : 280),
+            query: str(x.query, 120),
+            at: Number(x.at) || Date.now(),
+            x: fin(x.x),
+            y: fin(x.y),
+            bx: fin(x.bx),
+            by: fin(x.by),
+            r: clamp(-6, 6, Number(x.r) || 0),
+        };
+        if (kind === "unsplash") return validPhoto(x.photo) ? { id: x.photo.id, kind, photo: snap(x.photo), ...base } : null;
+        if (typeof x.id !== "string" || !ITEM_ID.test(x.id) || x.id[0] !== kind[0]) return null;
+        const m = x.media && typeof x.media === "object" ? x.media : {};
+        if (kind === "upload") return { id: x.id, kind, media: { w: posInt(m.w), h: posInt(m.h), color: hexOr(m.color), name: str(m.name, 120) }, ...base };
+        if (kind === "link") {
+            const href = safeUrl(m.href);
+            if (!href) return null;
+            const src = m.src ? safeUrl(m.src, true) : null;
+            return { id: x.id, kind, media: { href, src, title: str(m.title, 200), w: posInt(m.w), h: posInt(m.h), color: hexOr(m.color) }, ...base };
+        }
+        return { id: x.id, kind, tint: TINTS.includes(x.tint) ? x.tint : "sun", ...base };
+    }
 
     function cleanBoard(raw, fallbackName = "My board") {
         raw = raw && typeof raw === "object" ? raw : {};
@@ -95,9 +189,11 @@
         const seen = new Set();
         const pins = [];
         list.forEach((x) => {
-            if (pins.length >= MAX_PINS || !validPin(x) || seen.has(x.photo.id)) return;
-            seen.add(x.photo.id);
-            pins.push(cleanPin(x));
+            if (pins.length >= MAX_PINS) return;
+            const c = cleanItem(x);
+            if (!c || seen.has(c.id)) return;
+            seen.add(c.id);
+            pins.push(c);
         });
         const threads = [];
         const tk = new Set();
@@ -134,12 +230,12 @@
     if (!index.list.some((b) => b.id === index.active)) index.active = index.list[0].id;
 
     /* ---------- active board ---------- */
-    let B; // { name, pins, threads, frames }
+    let B; // { name, pins (items of every kind), threads, frames }
     const ids = new Set();
     let readonly = false; // viewing someone's shared link
     const reindex = () => {
         ids.clear();
-        B.pins.forEach((x) => ids.add(x.photo.id));
+        B.pins.forEach((x) => ids.add(x.id));
     };
 
     function loadActive() {
@@ -158,6 +254,7 @@
             store.set(INDEX, index);
             syncSwitcher();
         }
+        checkUsage();
     }
 
     function save() {
@@ -207,35 +304,68 @@
         undoBtn.disabled = !undoStack.length;
     }
 
-    /* ---------- pins ---------- */
+    /* ---------- items ---------- */
     const has = (id) => ids.has(id);
-    const pinBy = (id) => B.pins.find((x) => x.photo.id === id);
-    const nameOf = (id) => pinBy(id)?.photo.user.name || "photo";
+    const pinBy = (id) => B.pins.find((x) => x.id === id);
 
-    function add(p) {
+    function labelOf(x) {
+        if (!x) return "item";
+        if (x.kind === "unsplash") return x.photo.user.name;
+        if (x.kind === "upload") return x.media.name || "your image";
+        if (x.kind === "link") return hostOf(x.media.href);
+        return `note “${(x.note || "").trim().slice(0, 30) || "empty"}”`;
+    }
+    const nameOf = (id) => labelOf(pinBy(id));
+    const colorOf = (x) => (x.kind === "unsplash" ? x.photo.color : x.kind === "note" ? TINT_HEX[x.tint] : x.media.color || "#2a2723");
+    const fromLabel = (x) =>
+        x.kind === "upload" ? "Upload" : x.kind === "link" ? (x.media.src ? "Image link" : "Link") : !x.query ? "Editorial" : x.query.startsWith("@") ? x.query : `“${x.query}”`;
+
+    // an Unsplash photo from the wall / viewer; pos is a world top-left
+    function add(p, pos) {
         if (!p || has(p.id) || readonly) return;
+        const x = cleanItem({
+            kind: "unsplash",
+            photo: p,
+            query: state.mode === "search" ? state.query : state.mode === "user" && state.user ? `@${state.user.username}` : "",
+            at: Date.now(),
+            r: rnd(),
+            bx: pos?.x,
+            by: pos?.y,
+        });
+        if (!x) return;
         checkpoint();
-        B.pins.unshift(
-            cleanPin({
-                photo: p,
-                note: "",
-                query: state.mode === "search" ? state.query : state.mode === "user" && state.user ? `@${state.user.username}` : "",
-                at: Date.now(),
-                r: Math.round((Math.random() * 2 - 1) * 40) / 10,
-            })
-        );
-        ids.add(p.id);
+        B.pins.unshift(x);
+        ids.add(x.id);
         save();
     }
 
-    function remove(id) {
-        if (!has(id)) return;
+    // already-clean items, one undo step
+    function insertItems(list) {
+        list = list.filter((x) => x && !has(x.id));
+        if (!list.length || readonly) return [];
         checkpoint();
-        B.pins = B.pins.filter((x) => x.photo.id !== id);
-        B.threads = B.threads.filter((t) => t.a !== id && t.b !== id);
-        ids.delete(id);
+        list.forEach((x) => {
+            B.pins.unshift(x);
+            ids.add(x.id);
+        });
         save();
+        return list.map((x) => x.id);
     }
+
+    function removeMany(list) {
+        const drop = new Set(list.filter(has));
+        if (!drop.size || readonly) return 0;
+        checkpoint();
+        B.pins = B.pins.filter((x) => !drop.has(x.id));
+        B.threads = B.threads.filter((t) => !drop.has(t.a) && !drop.has(t.b));
+        drop.forEach((id) => {
+            ids.delete(id);
+            sel.delete(id);
+        });
+        save();
+        return drop.size;
+    }
+    const remove = (id) => removeMany([id]);
 
     // returns true when the photo ends up pinned
     function toggle(p, opts = {}) {
@@ -249,8 +379,6 @@
         else bump();
         return true;
     }
-
-    const fromLabel = (x) => (!x.query ? "Editorial" : x.query.startsWith("@") ? x.query : `“${x.query}”`);
 
     /* ---------- threads ---------- */
     const threadBy = (k) => B.threads.find((t) => tkey(t.a, t.b) === k);
@@ -271,7 +399,6 @@
         save();
         announce("Thread cut");
     }
-
     /* ---------- elements ---------- */
     const boardBtn = q("#cv-board");
     const countEl = q("#cv-board-n");
@@ -300,6 +427,29 @@
     const zoomOutBtn = q("#pb-zoom-out");
     const zoomInBtn = q("#pb-zoom-in");
     const zoomLvl = q("#pb-zoom-lvl");
+    const ctxEl = q("#pb-ctx");
+    const addBtn = q("#pb-add");
+    const addMenu = q("#pb-add-menu");
+    const exportBtn = q("#pb-export-btn");
+    const exportMenu = q("#pb-export-menu");
+    const imageBtn = q("#pb-image");
+    const findBtn = q("#pb-find-btn");
+    const find = q("#pb-find");
+    const findInput = q("#pb-find-q");
+    const findCount = q("#pb-find-n");
+    const paletteBtn = q("#pb-palette-btn");
+    const palette = q("#pb-palette");
+    const swatches = q("#pb-swatches");
+    const fileInput = q("#pb-file");
+    const linkbox = q("#pb-linkbox");
+    const linkInput = q("#pb-link-q");
+    const selbar = q("#pb-selbar");
+    const marquee = q("#pb-marquee");
+    const minimap = q("#pb-minimap");
+    const tray = q("#pb-tray");
+    const trayList = q("#pb-tray-list");
+    const dropHint = q("#pb-drop");
+    const guides = q("#pb-guides");
 
     let liveT = 0;
     function announce(msg) {
@@ -353,6 +503,7 @@
         lbPin.setAttribute("aria-pressed", on);
         lbPin.classList.toggle("is-on", on);
         lbPin.firstElementChild.textContent = on ? `Pinned to ${B.name}` : `Pin to ${B.name}`;
+        lbPin.disabled = readonly;
         lbPin.dataset.cursor = on ? "Unpin" : "Pin";
     }
 
@@ -377,9 +528,9 @@
         const b = id === index.active && !readonly ? B : store.get(bkey(id));
         const pins = Array.isArray(b?.pins) ? b.pins : [];
         const thumbs = pins
-            .slice(0, 3)
             .map((x) => x?.photo?.urls?.raw)
-            .filter((u) => typeof u === "string" && IMG_HOST.test(u));
+            .filter((u) => typeof u === "string" && IMG_HOST.test(u))
+            .slice(0, 3);
         return { n: pins.length, thumbs };
     }
 
@@ -503,6 +654,8 @@
         if (!index.list.some((b) => b.id === id)) return;
         closePop(false);
         cancelThreadFrom();
+        clearSel();
+        closeFind(false);
         index.active = id;
         store.set(INDEX, index);
         loadActive();
@@ -608,6 +761,7 @@
         }
         markMoving();
         placePop();
+        scheduleMinimap();
         if (readonly) return;
         clearTimeout(viewSaveT);
         const id = index.active;
@@ -773,8 +927,8 @@
     const knotEl = (k) => knots.querySelector(`.pb-knot[data-k="${CSS.escape(k)}"]`);
     const placed = (x) => Number.isFinite(x.bx) && Number.isFinite(x.by);
 
-    // pins that were never placed: very old saves stored fractions of the area,
-    // brand new pins take the first free slot in the visible part of the board
+    // items that were never placed: very old saves stored fractions of the area,
+    // brand new ones take the first free slot in the visible part of the board
     function placeNew() {
         const w = area.clientWidth || innerWidth;
         const h = area.clientHeight || innerHeight;
@@ -810,16 +964,23 @@
         const h = area.clientHeight;
         const cols = Math.max(1, Math.round(Math.sqrt(n * (w / h) * ((CARD_H + 28) / (CARD_W + 24)))));
         const from = new Map(cards().map((el) => [el.dataset.id, { left: el.offsetLeft, top: el.offsetTop }]));
-        B.pins.forEach((x, i) => {
-            x.bx = (i % cols) * (CARD_W + 24);
-            x.by = Math.floor(i / cols) * (CARD_H + 28);
-            x.r = Math.round((Math.random() * 2 - 1) * 30) / 10;
-        });
+        // rows are as tall as their tallest card (notes and links are shorter)
+        let y = 0;
+        for (let r = 0; r * cols < n; r++) {
+            const row = B.pins.slice(r * cols, r * cols + cols);
+            let rowH = 0;
+            row.forEach((x, c) => {
+                x.bx = c * (CARD_W + 24);
+                x.by = y;
+                x.r = Math.round((Math.random() * 2 - 1) * 30) / 10;
+                rowH = Math.max(rowH, geo.get(x.id)?.h || CARD_H);
+            });
+            y += rowH + 28;
+        }
         B.frames = [];
-        const rows = Math.ceil(n / cols);
         save();
-        fit(true, { l: 0, t: -12, r: cols * (CARD_W + 24) - 24, b: rows * (CARD_H + 28) - 28 });
-        announce("Tidied into a grid. Frames were removed; undo to bring them back.");
+        fit(true, { l: 0, t: -12, r: Math.min(n, cols) * (CARD_W + 24) - 24, b: y - 28 });
+        announce("Tidied into a grid. Groups were removed; undo to bring them back.");
         if (reduceMotion) return;
         cards().forEach((el, i) => {
             const a = from.get(el.dataset.id);
@@ -843,7 +1004,7 @@
     }
 
     // world-space box of every card, kept in step with what's on screen so
-    // threads and hit tests never have to read layout mid-gesture
+    // threads, snapping and hit tests never have to read layout mid-gesture
     const geo = new Map(); // id -> { l, t, w, h, r }
 
     // where a card's pin sits in world px, following the card's tilt
@@ -870,7 +1031,7 @@
     };
 
     const SVG = "http://www.w3.org/2000/svg";
-    const threadEls = new Map(); // key -> { g, paths: [hit, shadow, line], kn }
+    const threadEls = new Map(); // key -> { g, paths: [hit, shadow, line], kn, label }
 
     function threadEl(k) {
         let te = threadEls.get(k);
@@ -913,14 +1074,15 @@
             te.label = t.label;
             te.kn.firstChild.textContent = t.label;
             te.kn.classList.toggle("has-label", !!t.label);
-            te.kn.setAttribute("aria-label", `Thread between ${nameOf(t.a)} and ${nameOf(t.b)}${t.label ? `: ${t.label}` : ""}. Enter to edit, Delete to cut.`);
         }
+        te.kn.setAttribute("aria-label", `Thread between ${nameOf(t.a)} and ${nameOf(t.b)}${t.label ? `: ${t.label}` : ""}. Enter to edit, Delete to cut.`);
         te.kn.tabIndex = readonly ? -1 : 0;
         return k;
     }
 
     // redraw every thread, or only those touching the given card id(s)
     function drawStrings(only) {
+        scheduleMinimap();
         if (only != null) {
             const set = new Set(Array.isArray(only) ? only : [only]);
             B.threads.forEach((t) => (set.has(t.a) || set.has(t.b)) && drawThread(t));
@@ -941,6 +1103,14 @@
         placePop();
     }
 
+    function ariaFor(x) {
+        const note = x.note ? `, note: ${x.note}` : "";
+        if (x.kind === "unsplash") return `Photo by ${x.photo.user.name}${note}`;
+        if (x.kind === "upload") return `Your image ${x.media.name || ""}${note}`;
+        if (x.kind === "link") return `${x.media.src ? "Image" : "Link"} from ${hostOf(x.media.href)}${note}`;
+        return `Note: ${x.note || "empty"}`;
+    }
+
     function render() {
         syncCount();
         if (!lightbox.hidden) syncLightbox();
@@ -956,75 +1126,129 @@
         const keep = new Map(cards().map((el) => [el.dataset.id, el]));
         const live = [];
         B.pins.forEach((x) => {
-            const id = x.photo.id;
-            let el = keep.get(id);
-            keep.delete(id);
+            let el = keep.get(x.id);
+            keep.delete(x.id);
             if (!el) el = makeCard(x);
-            if (el.classList.contains("is-held")) return live.push([el, x]);
+            if (el.classList.contains("is-held") || el.classList.contains("is-carried")) return live.push([el, x]);
             el.style.width = `${CARD_W}px`;
             el.style.left = `${x.bx}px`;
             el.style.top = `${x.by}px`;
             el.style.setProperty("--r", `${x.r || 0}deg`);
+            if (x.kind === "note") el.style.setProperty("--tint", TINT_HEX[x.tint]);
             const note = el.querySelector(".pb-note");
             if (document.activeElement !== note) note.value = x.note || "";
             note.readOnly = readonly;
-            el.setAttribute("aria-label", `Photo by ${x.photo.user.name}${x.note ? `, note: ${x.note}` : ""}`);
-            const onWall = !!window.canvasView?.onWall?.(id);
+            el.setAttribute("aria-label", ariaFor(x));
             const loc = el.querySelector('[data-act="locate"]');
-            loc.disabled = !onWall;
-            loc.title = onWall ? "Fly to this frame on the wall" : "Not on the current wall — search for it to locate";
+            if (loc) {
+                const onWall = !!window.canvasView?.onWall?.(x.id);
+                loc.disabled = !onWall;
+                loc.title = onWall ? "Fly to this frame on the wall" : "Not on the current wall — search for it to locate";
+            }
             live.push([el, x]);
         });
         keep.forEach((el) => el.remove());
 
-        // all writes are done: read sizes once (cards share a width and height)
+        // all writes are done: read sizes once
         geo.clear();
-        let w = 0;
-        let h = 0;
         live.forEach(([el, x]) => {
-            if (!w) {
-                w = el.offsetWidth;
-                h = el.offsetHeight;
-            }
-            const held = el.classList.contains("is-held");
-            geo.set(x.photo.id, { l: held ? el.offsetLeft : x.bx, t: held ? el.offsetTop : x.by, w: w || CARD_W, h: h || CARD_H, r: x.r || 0 });
+            const moving = el.classList.contains("is-held") || el.classList.contains("is-carried");
+            geo.set(x.id, { l: moving ? el.offsetLeft : x.bx, t: moving ? el.offsetTop : x.by, w: el.offsetWidth || CARD_W, h: el.offsetHeight || CARD_H, r: x.r || 0 });
         });
 
+        [...sel].forEach((id) => !has(id) && sel.delete(id));
+        syncSel();
         drawStrings();
+        syncTray();
         emptyEl.hidden = B.pins.length > 0 || B.frames.length > 0;
         if (document.activeElement !== nameInput) nameInput.value = B.name;
         nameInput.readOnly = readonly;
     }
 
-    function makeCard(x) {
-        const p = x.photo;
-        const el = document.createElement("figure");
-        el.className = "pb-card";
-        el.dataset.id = p.id;
-        el.tabIndex = 0;
-        el.setAttribute("aria-roledescription", "pinned photo");
-        el.style.setProperty("--c", p.color || "#222");
+    const cardSrc = (p) => `${p.urls.raw}&w=420&h=525&fit=crop&crop=entropy&q=70&auto=format`;
+    const utmLink = (u) => `${u}?utm_source=aperture&utm_medium=referral`;
 
-        const pin = document.createElement("span");
-        pin.className = "pb-pin";
+    function mk(tag, cls, text) {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text != null) e.textContent = text;
+        return e;
+    }
+
+    function actButton(act, label, cursor, aria) {
+        const b = mk("button", "", label);
+        b.type = "button";
+        b.dataset.act = act;
+        b.dataset.cursor = cursor;
+        if (aria) b.setAttribute("aria-label", aria);
+        return b;
+    }
+
+    function extLink(href, label, cursor) {
+        const a = mk("a", "", label);
+        a.href = href;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.dataset.cursor = cursor;
+        return a;
+    }
+
+    function makeCard(x) {
+        const id = x.id;
+        const card = mk("figure", `pb-card is-${x.kind}`);
+        card.dataset.id = id;
+        card.tabIndex = 0;
+        card.setAttribute("aria-roledescription", { unsplash: "pinned photo", upload: "your image", link: "link", note: "note" }[x.kind]);
+        card.style.setProperty("--c", colorOf(x));
+
+        const pin = mk("span", "pb-pin");
         pin.setAttribute("aria-hidden", "true");
         pin.dataset.cursor = "Thread";
-        pin.title = "Drag onto another photo to tie a thread";
+        pin.title = "Drag onto another card to tie a thread";
+        card.appendChild(pin);
 
-        const img = document.createElement("img");
-        img.alt = p.alt_description || p.description || "Pinned photo";
-        img.draggable = false;
-        img.loading = "lazy";
-        img.src = cardSrc(p);
+        // picture
+        if (x.kind !== "note") {
+            if (x.kind === "link" && !x.media.src) {
+                const bm = mk("a", "pb-bookmark");
+                bm.href = x.media.href;
+                bm.target = "_blank";
+                bm.rel = "noopener noreferrer";
+                bm.draggable = false;
+                bm.dataset.cursor = "Open";
+                bm.append(mk("span", "pb-bookmark-host", hostOf(x.media.href)), mk("span", "pb-bookmark-path mono", x.media.title || x.media.href));
+                card.appendChild(bm);
+            } else {
+                const img = mk("img");
+                img.draggable = false;
+                img.loading = "lazy";
+                img.decoding = "async";
+                if (x.kind === "unsplash") {
+                    img.alt = x.photo.alt_description || x.photo.description || "Pinned photo";
+                    img.src = cardSrc(x.photo);
+                } else if (x.kind === "upload") {
+                    img.alt = x.media.name || "Your image";
+                    window.media?.url(id).then((u) => {
+                        if (u) img.src = u;
+                        else card.classList.add("is-missing");
+                    });
+                } else {
+                    img.alt = x.media.title || "Image from a link";
+                    img.referrerPolicy = "no-referrer";
+                    img.src = x.media.src;
+                    img.onerror = () => card.classList.add("is-missing");
+                }
+                card.appendChild(img);
+            }
+        }
 
-        const cap = document.createElement("figcaption");
-        const note = document.createElement("textarea");
-        note.className = "pb-note";
-        note.rows = 2;
-        note.maxLength = 280;
-        note.placeholder = "why this one…";
+        const cap = mk("figcaption");
+        const note = mk("textarea", x.kind === "note" ? "pb-note pb-sticky" : "pb-note");
+        note.rows = x.kind === "note" ? 6 : 2;
+        note.maxLength = x.kind === "note" ? 1000 : 280;
+        note.placeholder = x.kind === "note" ? "Write something…" : "why this one…";
         note.value = x.note || "";
-        note.setAttribute("aria-label", "Note for this pin");
+        note.setAttribute("aria-label", x.kind === "note" ? "Note text" : "Note for this card");
         let t = 0;
         let marked = false;
         note.addEventListener("focus", () => (marked = false));
@@ -1035,54 +1259,36 @@
             }
             clearTimeout(t);
             t = setTimeout(() => {
-                const cur = pinBy(p.id);
+                const cur = pinBy(id);
                 if (!cur) return;
                 cur.note = note.value;
                 persist();
             }, 250);
         });
+        cap.appendChild(note);
 
-        const meta = document.createElement("div");
-        meta.className = "pb-meta mono";
-        const by = document.createElement("a");
-        by.href = `${p.user.links.html}?utm_source=aperture&utm_medium=referral`;
-        by.target = "_blank";
-        by.rel = "noopener";
-        by.textContent = p.user.name;
-        const from = document.createElement("span");
-        from.textContent = fromLabel(x);
-        meta.append(by, from);
+        // credit / source line
+        if (x.kind !== "note") {
+            const meta = mk("div", "pb-meta mono");
+            if (x.kind === "unsplash") meta.append(extLink(utmLink(x.photo.user.links.html), x.photo.user.name, "Profile"), mk("span", "", fromLabel(x)));
+            else if (x.kind === "upload") meta.append(mk("span", "", x.media.name || "Your image"), mk("span", "", "Upload"));
+            else meta.append(mk("span", "", hostOf(x.media.href)), mk("span", "", fromLabel(x)));
+            cap.appendChild(meta);
+        }
 
-        const acts = document.createElement("div");
-        acts.className = "pb-acts mono";
-        const locate = document.createElement("button");
-        locate.type = "button";
-        locate.dataset.act = "locate";
-        locate.dataset.cursor = "Locate";
-        locate.textContent = "Locate ◎";
-        const open = document.createElement("a");
-        open.href = `${p.links.html}?utm_source=aperture&utm_medium=referral`;
-        open.target = "_blank";
-        open.rel = "noopener";
-        open.dataset.cursor = "Open";
-        open.textContent = "Unsplash ↗";
-        const del = document.createElement("button");
-        del.type = "button";
-        del.dataset.act = "remove";
-        del.dataset.cursor = "Unpin";
-        del.setAttribute("aria-label", `Remove pin: photo by ${p.user.name}`);
-        del.textContent = "✕";
-        acts.append(locate, open, del);
+        const acts = mk("div", "pb-acts mono");
+        if (x.kind === "unsplash") acts.append(actButton("locate", "Locate ◎", "Locate"), extLink(utmLink(x.photo.links.html), "Unsplash ↗", "Open"));
+        else if (x.kind === "link") acts.append(extLink(x.media.href, "Open ↗", "Open"), mk("span"));
+        else if (x.kind === "note") acts.append(actButton("tint", "Colour ◐", "Colour", "Change note colour"), mk("span"));
+        else acts.append(mk("span"), mk("span"));
+        acts.append(actButton("remove", "✕", "Remove", `Remove ${labelOf(x)}`));
+        cap.appendChild(acts);
 
-        cap.append(note, meta, acts);
-        el.append(pin, img, cap);
-        world.insertBefore(el, strings);
-
-        if (!reduceMotion && !opening) gsap.from(el, { y: -60, opacity: 0, rotate: (x.r || 0) * 4, duration: 0.8, ease: "back.out(1.6)" });
-        return el;
+        card.appendChild(cap);
+        world.insertBefore(card, strings);
+        if (!reduceMotion && !opening) gsap.from(card, { y: -60, opacity: 0, rotate: (x.r || 0) * 4, duration: 0.8, ease: "back.out(1.6)" });
+        return card;
     }
-
-    const cardSrc = (p) => `${p.urls.raw}&w=420&h=525&fit=crop&crop=entropy&q=70&auto=format`;
 
     /* ---------- frames (groups) ---------- */
     const frameBy = (id) => B.frames.find((f) => f.id === id);
@@ -1188,7 +1394,7 @@
         frameEl(f.id)?.querySelector(".pb-frame-title").focus({ preventScroll: true });
         announce("Group added. Type a title, drag photos into it; moving the group moves them too.");
     }
-    q("#pb-frame").addEventListener("click", newFrame);
+    q("#pb-frame").addEventListener("click", () => (sel.size > 1 ? frameAround([...sel]) : newFrame()));
 
     /* ---------- thread popover (label + cut) ---------- */
     let popKey = null;
@@ -1269,41 +1475,333 @@
         else announce("Those two are already tied");
     }
 
+    /* ---------- menus (Add, Export, right-click / long-press) ---------- */
+    let openMenu = null; // { el, btn, onClose }
+    const menuItems = (m) => [...m.querySelectorAll('[role="menuitem"]')].filter((i) => !i.disabled && i.offsetParent !== null);
+
+    function showMenu(m, { btn = null, x = 0, y = 0, sheet = false, onClose } = {}) {
+        closeMenu(false);
+        closePalette();
+        m.hidden = false;
+        m.classList.toggle("is-sheet", sheet);
+        if (!sheet) {
+            const r = btn ? btn.getBoundingClientRect() : null;
+            const mw = m.offsetWidth;
+            const mh = m.offsetHeight;
+            let left = r ? r.left : x;
+            let topPx = r ? r.bottom + 8 : y;
+            left = clamp(8, Math.max(8, innerWidth - mw - 8), left);
+            if (topPx + mh > innerHeight - 8) topPx = Math.max(8, (r ? r.top : y) - mh - 8);
+            m.style.left = `${left}px`;
+            m.style.top = `${topPx}px`;
+        } else {
+            m.style.left = m.style.top = "";
+        }
+        btn?.setAttribute("aria-expanded", "true");
+        openMenu = { el: m, btn, onClose };
+        menuItems(m)[0]?.focus({ preventScroll: true });
+        if (!reduceMotion) gsap.fromTo(m, { opacity: 0, y: sheet ? 24 : -6 }, { opacity: 1, y: 0, duration: 0.28, ease: "expo.out" });
+    }
+
+    function closeMenu(refocus) {
+        if (!openMenu) return false;
+        const m = openMenu;
+        openMenu = null;
+        m.el.hidden = true;
+        m.btn?.setAttribute("aria-expanded", "false");
+        if (refocus) (m.btn || area).focus({ preventScroll: true });
+        m.onClose?.();
+        return true;
+    }
+
+    function menuKeys(e) {
+        if (!openMenu) return false;
+        const items = menuItems(openMenu.el);
+        const i = items.indexOf(document.activeElement);
+        const go = (n) => items[(n + items.length) % items.length]?.focus({ preventScroll: true });
+        if (e.key === "ArrowDown") go(i + 1);
+        else if (e.key === "ArrowUp") go(i - 1);
+        else if (e.key === "Home") go(0);
+        else if (e.key === "End") go(items.length - 1);
+        else if (e.key === "Escape") closeMenu(true);
+        else if (e.key === "Tab") closeMenu(false);
+        else if ((e.key === "Enter" || e.key === " ") && items[i]) items[i].click();
+        else return true; // swallow other keys while a menu is open
+        if (e.key !== "Tab") e.preventDefault();
+        return true;
+    }
+
+    document.addEventListener("pointerdown", (e) => {
+        if (openMenu && !openMenu.el.contains(e.target) && !openMenu.btn?.contains(e.target)) closeMenu(false);
+    });
+
+    // context menu content is built per use
+    function ctxMenu(items, at, sheet) {
+        ctxEl.textContent = "";
+        items.forEach((it) => {
+            if (!it) return;
+            const b = mk("button", it.danger ? "is-danger" : "", it.label);
+            b.type = "button";
+            b.setAttribute("role", "menuitem");
+            b.addEventListener("click", () => {
+                closeMenu(false);
+                it.run();
+            });
+            ctxEl.appendChild(b);
+        });
+        showMenu(ctxEl, { x: at[0], y: at[1], sheet });
+    }
+
+    function cardMenu(id, at, sheet) {
+        const x = pinBy(id);
+        if (!x || readonly) return;
+        const many = sel.size > 1 && sel.has(id);
+        ctxMenu(
+            [
+                { label: "Tie a thread from here…", run: () => startThreadFrom(id) },
+                many ? null : { label: sel.has(id) ? "Deselect" : "Select", run: () => (sel.has(id) ? (sel.delete(id), syncSel()) : setSel([id], true)) },
+                { label: "Bring to front", run: () => (cardEl(id).style.zIndex = ++top) },
+                many ? { label: `Group ${sel.size} selected`, run: () => frameAround([...sel]) } : null,
+                x.kind === "unsplash" && window.canvasView?.onWall?.(id) ? { label: "Locate on the wall", run: () => closeBoard(() => window.canvasView.locate(id)) } : null,
+                x.kind === "link" ? { label: "Open link ↗", run: () => window.open(x.media.href, "_blank", "noopener,noreferrer") } : null,
+                x.kind === "note" ? { label: "Change colour", run: () => cycleTint(id) } : null,
+                { label: many ? `Remove ${sel.size} items` : "Remove", danger: true, run: () => removeWithNote(many ? [...sel] : [id]) },
+            ],
+            at,
+            sheet
+        );
+    }
+
+    function areaMenu(at, sheet) {
+        if (readonly) return;
+        ctxMenu(
+            [
+                { label: "Add a note here", run: () => addNote(at) },
+                { label: "Add images…", run: () => pickFiles(at) },
+                { label: "Add a link…", run: () => openLinkbox(at) },
+                { label: "Photos from the wall", run: openTray },
+                B.pins.length ? { label: "Select all", run: () => setSel(B.pins.map((x) => x.id)) } : null,
+                { label: "Fit everything", run: () => fit(true) },
+            ],
+            at,
+            sheet
+        );
+    }
+
+    function removeWithNote(list) {
+        const n = removeMany(list);
+        if (n) announce(`Removed ${n === 1 ? "1 item" : `${n} items`}. Ctrl+Z to undo.`);
+        if (n > 1) toast(`Removed ${n} items — Ctrl+Z to undo`);
+    }
+
+    function cycleTint(id) {
+        const x = pinBy(id);
+        if (!x || x.kind !== "note") return;
+        checkpoint();
+        x.tint = TINTS[(TINTS.indexOf(x.tint) + 1) % TINTS.length];
+        save();
+    }
+
+    /* ---------- selection ---------- */
+    const sel = new Set();
+
+    function syncSel() {
+        cards().forEach((c) => c.classList.toggle("is-selected", sel.has(c.dataset.id)));
+        const n = sel.size;
+        selbar.hidden = n < 2 || readonly;
+        q("#pb-sel-n").textContent = `${n} selected`;
+        qa("[data-dist]", selbar).forEach((b) => (b.disabled = n < 3));
+    }
+
+    function setSel(list, additive) {
+        if (!additive) sel.clear();
+        list.forEach((id) => has(id) && sel.add(id));
+        syncSel();
+    }
+
+    function clearSel() {
+        if (!sel.size) return false;
+        sel.clear();
+        syncSel();
+        return true;
+    }
+
+    // align / distribute the selection, one undo step
+    function arrange(how) {
+        const list = [...sel].map((id) => ({ x: pinBy(id), g: geo.get(id) })).filter((o) => o.x && o.g);
+        if (list.length < 2) return;
+        checkpoint();
+        const L = Math.min(...list.map((o) => o.g.l));
+        const T = Math.min(...list.map((o) => o.g.t));
+        const R = Math.max(...list.map((o) => o.g.l + o.g.w));
+        const Bm = Math.max(...list.map((o) => o.g.t + o.g.h));
+        if (how === "left") list.forEach((o) => (o.x.bx = L));
+        if (how === "right") list.forEach((o) => (o.x.bx = R - o.g.w));
+        if (how === "hcenter") list.forEach((o) => (o.x.bx = (L + R) / 2 - o.g.w / 2));
+        if (how === "top") list.forEach((o) => (o.x.by = T));
+        if (how === "bottom") list.forEach((o) => (o.x.by = Bm - o.g.h));
+        if (how === "vcenter") list.forEach((o) => (o.x.by = (T + Bm) / 2 - o.g.h / 2));
+        if (how === "hdist" || how === "vdist") {
+            const hz = how === "hdist";
+            list.sort((a, b) => (hz ? a.g.l - b.g.l : a.g.t - b.g.t));
+            const total = list.reduce((s, o) => s + (hz ? o.g.w : o.g.h), 0);
+            const gap = ((hz ? R - L : Bm - T) - total) / (list.length - 1);
+            let at = hz ? L : T;
+            list.forEach((o) => {
+                if (hz) o.x.bx = at;
+                else o.x.by = at;
+                at += (hz ? o.g.w : o.g.h) + gap;
+            });
+        }
+        list.forEach((o) => (o.x.r = 0));
+        save();
+        announce("Arranged");
+    }
+
+    // a titled group drawn around some items
+    function frameAround(list) {
+        const gs = list.map((id) => geo.get(id)).filter(Boolean);
+        if (!gs.length || readonly) return;
+        checkpoint();
+        const pad = 36;
+        const l = Math.min(...gs.map((g) => g.l)) - pad;
+        const t = Math.min(...gs.map((g) => g.t)) - pad - 40;
+        const r = Math.max(...gs.map((g) => g.l + g.w)) + pad;
+        const b = Math.max(...gs.map((g) => g.t + g.h)) + pad;
+        const f = { id: uid(), x: Math.round(l), y: Math.round(t), w: Math.round(r - l), h: Math.round(b - t), title: "" };
+        B.frames.push(f);
+        save();
+        clearSel();
+        frameEl(f.id)?.querySelector(".pb-frame-title").focus({ preventScroll: true });
+        announce("Grouped. Type a title for the group.");
+    }
+
+    selbar.addEventListener("click", (e) => {
+        const b = e.target.closest("button");
+        if (!b) return;
+        if (b.dataset.align) arrange(b.dataset.align);
+        else if (b.dataset.dist) arrange(b.dataset.dist);
+        else if (b.id === "pb-sel-group") frameAround([...sel]);
+        else if (b.id === "pb-sel-delete") removeWithNote([...sel]);
+        else if (b.id === "pb-sel-clear") clearSel();
+    });
+
     /* ---------- pointer interactions ---------- */
     area.addEventListener("click", (e) => {
         const th = e.target.closest?.(".pb-thread, .pb-knot");
         if (th) return openPop(th.dataset.k);
         const btn = e.target.closest("button[data-act]");
         if (!btn) return;
-        const el = btn.closest(".pb-card");
-        const id = el.dataset.id;
+        const card = btn.closest(".pb-card");
+        const id = card.dataset.id;
         if (btn.dataset.act === "remove") {
             if (readonly) return;
             const done = () => {
                 remove(id);
-                announce(`Unpinned. ${navigator.platform.includes("Mac") ? "⌘" : "Ctrl"}+Z to undo.`);
+                announce("Removed. Ctrl+Z to undo.");
             };
             if (reduceMotion) return done();
-            gsap.to(el, { y: 80, rotate: 18, opacity: 0, duration: 0.5, ease: "power2.in", onComplete: done });
+            gsap.to(card, { y: 80, rotate: 18, opacity: 0, duration: 0.5, ease: "power2.in", onComplete: done });
         } else if (btn.dataset.act === "locate") {
             closeBoard(() => window.canvasView?.locate?.(id));
+        } else if (btn.dataset.act === "tint") {
+            cycleTint(id);
         }
     });
 
-    // one gesture at a time: move a card, pull a thread, move/resize a frame,
-    // pan the board, or pinch-zoom with two fingers. Pointer events only record
+    let lastLongPress = 0;
+    // a long-press sheet opens under the finger: the click that follows lifting
+    // it must not land on whichever menu item ended up beneath
+    let sheetGuard = false;
+    let sheetGuardUntil = 0;
+    document.addEventListener(
+        "pointerup",
+        () => {
+            if (!sheetGuard) return;
+            sheetGuard = false;
+            sheetGuardUntil = performance.now() + 400;
+        },
+        true
+    );
+    document.addEventListener(
+        "click",
+        (e) => {
+            if ((sheetGuard || performance.now() < sheetGuardUntil) && e.target.closest?.(".pb-menu")) {
+                e.preventDefault();
+                e.stopImmediatePropagation();
+            }
+        },
+        true
+    );
+    const armSheet = () => {
+        lastLongPress = performance.now();
+        sheetGuard = true;
+    };
+    area.addEventListener("contextmenu", (e) => {
+        // touch browsers fire their own contextmenu after a long press: ours already opened
+        if (performance.now() - lastLongPress < 1200) return e.preventDefault();
+        if (e.target.closest("textarea, input, a, .pb-pop, .pb-tray, .pb-find, .pb-linkbox, .pb-selbar")) return;
+        e.preventDefault();
+        const card = e.target.closest(".pb-card");
+        if (card) cardMenu(card.dataset.id, [e.clientX, e.clientY], false);
+        else areaMenu([e.clientX, e.clientY], false);
+    });
+
+    // one gesture at a time: move cards, pull a thread, move/resize a frame,
+    // draw a selection box, pan, or pinch-zoom. Pointer events only record
     // where the pointer is; the DOM is touched at most once per frame.
     let drag = null;
     const touches = new Map();
+    const LONG_PRESS = 480;
     const pinchGeom = () => {
         const [a, b] = [...touches.values()];
         return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
     };
 
-    // a held card trails the pointer a touch and tilts with its speed, then
-    // settles where you let go
+    // snap the grabbed card's edges / centre to other cards, and report guides
+    function snapTo(d, tx, ty) {
+        const g = geo.get(d.cardId);
+        if (!g || d.noSnap) return [tx, ty, ""];
+        const th = 7 / view.z;
+        const l = d.left + tx;
+        const t = d.top + ty;
+        const xs = [l, l + g.w / 2, l + g.w];
+        const ys = [t, t + g.h / 2, t + g.h];
+        let bx = null;
+        let by = null;
+        geo.forEach((o, oid) => {
+            if (d.moving.has(oid)) return;
+            const ox = [o.l, o.l + o.w / 2, o.l + o.w];
+            const oy = [o.t, o.t + o.h / 2, o.t + o.h];
+            xs.forEach((a) => ox.forEach((b) => {
+                const diff = b - a;
+                if (Math.abs(diff) < th && (!bx || Math.abs(diff) < Math.abs(bx.diff))) bx = { diff, at: b, o };
+            }));
+            ys.forEach((a) => oy.forEach((b) => {
+                const diff = b - a;
+                if (Math.abs(diff) < th && (!by || Math.abs(diff) < Math.abs(by.diff))) by = { diff, at: b, o };
+            }));
+        });
+        let path = "";
+        if (bx) {
+            tx += bx.diff;
+            const y0 = Math.min(t + (by ? by.diff : 0), bx.o.t) - 16;
+            const y1 = Math.max(t + (by ? by.diff : 0) + g.h, bx.o.t + bx.o.h) + 16;
+            path += `M${bx.at},${y0} V${y1} `;
+        }
+        if (by) {
+            ty += by.diff;
+            const x0 = Math.min(d.left + tx, by.o.l) - 16;
+            const x1 = Math.max(d.left + tx + g.w, by.o.l + by.o.w) + 16;
+            path += `M${x0},${by.at} H${x1}`;
+        }
+        return [tx, ty, path];
+    }
+
+    // held cards trail the pointer a touch and tilt with their speed, then
+    // settle where you let go; the rest of a selection rides along
     function followCard(d) {
-        const id = d.el.dataset.id;
+        const ids = [d.cardId, ...d.group.map((m) => m.id)];
         const step = () => {
             const k = reduceMotion ? 1 : 0.42;
             const px = d.cx;
@@ -1311,15 +1809,28 @@
             d.cy += (d.ty - d.cy) * k;
             const tiltTo = reduceMotion ? 0 : clamp(-10, 10, (d.cx - px) * 0.55);
             d.tilt += (tiltTo - d.tilt) * 0.3;
-            d.el.style.translate = `${d.cx.toFixed(2)}px ${d.cy.toFixed(2)}px`;
+            const tr = `${d.cx.toFixed(2)}px ${d.cy.toFixed(2)}px`;
+            d.el.style.translate = tr;
             d.el.style.setProperty("--tilt", `${d.tilt.toFixed(2)}deg`);
-            const g = geo.get(id);
+            const g = geo.get(d.cardId);
             if (g) {
                 g.l = d.left + d.cx;
                 g.t = d.top + d.cy;
                 g.r = d.tilt;
             }
-            drawStrings(id);
+            d.group.forEach((m) => {
+                if (m.el) m.el.style.translate = tr;
+                const mg = geo.get(m.id);
+                if (mg) {
+                    mg.l = m.left + d.cx;
+                    mg.t = m.top + d.cy;
+                }
+            });
+            if (d.guide !== d.drawnGuide) {
+                d.drawnGuide = d.guide;
+                guides.setAttribute("d", d.guide || "");
+            }
+            drawStrings(ids);
             if (d.released && Math.abs(d.tx - d.cx) < 0.25 && Math.abs(d.ty - d.cy) < 0.25 && Math.abs(d.tilt) < 0.15) return finishCard(d);
             d.raf = requestAnimationFrame(step);
         };
@@ -1328,23 +1839,33 @@
 
     function finishCard(d) {
         cancelAnimationFrame(d.raf);
-        const { el } = d;
-        const x = pinBy(el.dataset.id);
-        el.style.left = `${d.left + d.tx}px`;
-        el.style.top = `${d.top + d.ty}px`;
-        el.style.translate = "";
-        el.style.removeProperty("--tilt");
-        el.classList.remove("is-held");
-        const g = geo.get(el.dataset.id);
-        if (g) {
-            g.l = d.left + d.tx;
-            g.t = d.top + d.ty;
-            g.r = x?.r || 0;
-        }
-        if (!x || !d.moved) return drawStrings(el.dataset.id);
+        clearTimeout(d.lp);
+        guides.removeAttribute("d");
+        const all = [{ id: d.cardId, el: d.el, left: d.left, top: d.top }, ...d.group];
+        all.forEach((m) => {
+            const x = pinBy(m.id);
+            if (m.el) {
+                m.el.style.left = `${m.left + d.tx}px`;
+                m.el.style.top = `${m.top + d.ty}px`;
+                m.el.style.translate = "";
+                m.el.style.removeProperty("--tilt");
+                m.el.classList.remove("is-held", "is-carried");
+            }
+            const g = geo.get(m.id);
+            if (g) {
+                g.l = m.left + d.tx;
+                g.t = m.top + d.ty;
+                g.r = x?.r || 0;
+            }
+        });
+        if (!d.moved) return drawStrings(all.map((m) => m.id));
         checkpoint(d.snap);
-        x.bx = d.left + d.tx;
-        x.by = d.top + d.ty;
+        all.forEach((m) => {
+            const x = pinBy(m.id);
+            if (!x) return;
+            x.bx = m.left + d.tx;
+            x.by = m.top + d.ty;
+        });
         save();
     }
 
@@ -1352,15 +1873,22 @@
         if (!drag) return;
         const d = drag;
         drag = null;
+        clearTimeout(d.lp);
         area.classList.remove("is-panning", "is-threading");
         tempPath.removeAttribute("d");
+        marquee.hidden = true;
         d.target?.classList.remove("is-target");
         if (d.kind === "card") d.released = true;
         if (d.kind === "frame" || d.kind === "resize") commitFrame(d);
     }
 
+    const worldAt = (cx, cy) => {
+        const r = area.getBoundingClientRect();
+        return [(cx - r.left - view.x) / view.z, (cy - r.top - view.y) / view.z];
+    };
+
     area.addEventListener("pointerdown", (e) => {
-        if (e.target.closest(".pb-pop")) return;
+        if (e.target.closest(".pb-pop, .pb-tray, .pb-find, .pb-linkbox, .pb-selbar, .pb-minimap")) return;
         closePop(false);
         if (e.pointerType === "touch") {
             touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -1379,26 +1907,49 @@
         if (e.target.closest(".pb-thread, .pb-knot")) return;
         const card = e.target.closest(".pb-card");
         const frame = e.target.closest(".pb-frame");
+        const touch = e.pointerType === "touch";
 
-        if (card && !readonly && e.target.closest(".pb-pin")) {
-            e.preventDefault();
-            area.setPointerCapture(e.pointerId);
-            area.classList.add("is-threading");
-            drag = { kind: "thread", from: card.dataset.id, id: e.pointerId, target: null };
-            return threadMove(e.clientX, e.clientY);
-        }
-        if (card && e.target.closest("textarea, button, a")) return;
         if (card && !readonly) {
+            const id = card.dataset.id;
+            // second half of "tie a thread from here" (menu, keyboard or touch)
+            if (threadFrom) {
+                e.preventDefault();
+                return finishThreadTo(id);
+            }
+            if (e.target.closest(".pb-pin")) {
+                e.preventDefault();
+                area.setPointerCapture(e.pointerId);
+                area.classList.add("is-threading");
+                drag = { kind: "thread", from: id, id: e.pointerId, target: null };
+                return threadMove(e.clientX, e.clientY);
+            }
+            if (e.target.closest("textarea, button, a")) return;
             e.preventDefault();
+            if (e.shiftKey || e.metaKey || e.ctrlKey) {
+                if (sel.has(id)) sel.delete(id);
+                else sel.add(id);
+                return syncSel();
+            }
             if (card.classList.contains("is-held")) return; // still settling from the last drop
+            if (!sel.has(id)) setSel([id]);
             card.focus({ preventScroll: true });
             card.setPointerCapture(e.pointerId);
             card.style.zIndex = ++top;
             card.classList.add("is-held");
-            const g = geo.get(card.dataset.id);
+            const g = geo.get(id);
+            const group = [...sel]
+                .filter((o) => o !== id && geo.get(o))
+                .map((o) => {
+                    const oel = cardEl(o);
+                    oel?.classList.add("is-carried");
+                    return { id: o, el: oel, left: geo.get(o).l, top: geo.get(o).t };
+                });
             drag = {
                 kind: "card",
                 el: card,
+                cardId: id,
+                group,
+                moving: new Set([id, ...group.map((m) => m.id)]),
                 id: e.pointerId,
                 sx: e.clientX,
                 sy: e.clientY,
@@ -1409,11 +1960,23 @@
                 tx: 0,
                 ty: 0,
                 tilt: 0,
+                guide: "",
                 snap: snapshot(),
                 moved: false,
                 released: false,
             };
-            return followCard(drag);
+            const d = drag;
+            if (touch)
+                d.lp = setTimeout(() => {
+                    if (drag !== d || d.far) return;
+                    drag = null;
+                    d.moved = false;
+                    d.tx = d.ty = 0;
+                    d.released = true;
+                    armSheet();
+                    cardMenu(id, [d.sx, d.sy], true);
+                }, LONG_PRESS);
+            return followCard(d);
         }
         if (frame && !readonly) {
             const f = frameBy(frame.dataset.id);
@@ -1437,16 +2000,33 @@
         e.preventDefault();
         area.focus({ preventScroll: true });
         area.setPointerCapture(e.pointerId);
+        if (threadFrom) cancelThreadFrom();
+
+        // shift + drag on empty space draws a selection box
+        if (e.shiftKey && !readonly && !touch) {
+            const r = area.getBoundingClientRect();
+            drag = { kind: "marquee", id: e.pointerId, sx: e.clientX, sy: e.clientY, r, base: new Set(sel) };
+            return;
+        }
+        if (!e.shiftKey) clearSel();
         area.classList.add("is-panning");
         stopCam();
         drag = { kind: "pan", id: e.pointerId, sx: e.clientX, sy: e.clientY, x: view.x, y: view.y, samples: [{ t: e.timeStamp, x: e.clientX, y: e.clientY }] };
+        const d = drag;
+        if (touch && !readonly)
+            d.lp = setTimeout(() => {
+                if (drag !== d || d.far) return;
+                drag = null;
+                area.classList.remove("is-panning");
+                armSheet();
+                areaMenu([d.sx, d.sy], true);
+            }, LONG_PRESS);
     });
 
     function threadMove(cx, cy) {
         if (!drag || drag.kind !== "thread") return;
         const a = pinPoint(drag.from);
-        const r = area.getBoundingClientRect();
-        const b = [(cx - r.left - view.x) / view.z, (cy - r.top - view.y) / view.z];
+        const b = worldAt(cx, cy);
         if (a) tempPath.setAttribute("d", stringPath(a, b));
         const over = document.elementFromPoint(cx, cy)?.closest(".pb-card");
         const target = over && over.dataset.id !== drag.from ? over : null;
@@ -1474,18 +2054,43 @@
         if (e.pointerId !== d.id) return;
         const cx = e.clientX;
         const cy = e.clientY;
+        if (!d.far && Math.hypot(cx - d.sx, cy - d.sy) > 8) {
+            d.far = true;
+            clearTimeout(d.lp);
+        }
         if (d.kind === "thread") return onFrame(() => threadMove(cx, cy));
         if (d.kind === "pan") {
             d.samples.push({ t: e.timeStamp, x: cx, y: cy });
             if (d.samples.length > 6) d.samples.shift();
             return onFrame(() => drag === d && setViewNow(d.x + cx - d.sx, d.y + cy - d.sy));
         }
+        if (d.kind === "marquee") {
+            return onFrame(() => {
+                if (drag !== d) return;
+                const l = Math.min(cx, d.sx) - d.r.left;
+                const t = Math.min(cy, d.sy) - d.r.top;
+                const w = Math.abs(cx - d.sx);
+                const h = Math.abs(cy - d.sy);
+                marquee.hidden = false;
+                marquee.style.transform = `translate(${l}px, ${t}px)`;
+                marquee.style.width = `${w}px`;
+                marquee.style.height = `${h}px`;
+                const [wl, wt] = worldAt(Math.min(cx, d.sx), Math.min(cy, d.sy));
+                const [wr, wb] = worldAt(Math.max(cx, d.sx), Math.max(cy, d.sy));
+                sel.clear();
+                d.base.forEach((id) => sel.add(id));
+                geo.forEach((g, id) => {
+                    if (g.l < wr && g.l + g.w > wl && g.t < wb && g.t + g.h > wt) sel.add(id);
+                });
+                syncSel();
+            });
+        }
         const dx = (cx - d.sx) / view.z;
         const dy = (cy - d.sy) / view.z;
         if (Math.abs(dx) + Math.abs(dy) > 1) d.moved = true;
         if (d.kind === "card") {
-            d.tx = dx;
-            d.ty = dy;
+            d.noSnap = e.altKey;
+            [d.tx, d.ty, d.guide] = snapTo(d, dx, dy);
             return;
         }
         onFrame(() => {
@@ -1545,6 +2150,12 @@
         if (e.pointerId !== drag.id) return;
         const d = drag;
         drag = null;
+        clearTimeout(d.lp);
+        if (d.kind === "marquee") {
+            marquee.hidden = true;
+            if (sel.size) announce(`${sel.size} selected`);
+            return;
+        }
         if (d.kind === "pan") {
             area.classList.remove("is-panning");
             // flick: carry the release velocity into a glide
@@ -1555,8 +2166,7 @@
             if (dt > 0 && e.timeStamp - last.t < 60 && !reduceMotion) {
                 const vx = (last.x - first.x) / dt;
                 const vy = (last.y - first.y) / dt;
-                const glide = 170;
-                panBy(clamp(-1400, 1400, vx * glide), clamp(-1400, 1400, vy * glide));
+                panBy(clamp(-1400, 1400, vx * 170), clamp(-1400, 1400, vy * 170));
             }
             return;
         }
@@ -1593,33 +2203,30 @@
     area.addEventListener("focusin", (e) => {
         const card = e.target.closest(".pb-card");
         const frame = e.target.closest(".pb-frame");
-        if (card) reveal(card.offsetLeft, card.offsetTop - 12, card.offsetWidth, card.offsetHeight + 12);
+        const g = card && geo.get(card.dataset.id);
+        if (g) reveal(g.l, g.t - 12, g.w, g.h + 12);
         else if (frame) reveal(frame.offsetLeft, frame.offsetTop, Math.min(frame.offsetWidth, 400), 60);
     });
 
     /* ---------- keyboard ---------- */
     let lastKeyMove = 0;
-    function keyMove(kind, el, dx, dy) {
+    function keyMove(list, dx, dy, frameId) {
         const now = performance.now();
         if (now - lastKeyMove > 800) checkpoint();
         lastKeyMove = now;
-        if (kind === "card") {
-            const x = pinBy(el.dataset.id);
-            if (!x) return;
-            x.bx += dx;
-            x.by += dy;
-        } else {
-            const f = frameBy(el.closest(".pb-frame").dataset.id);
+        if (frameId) {
+            const f = frameBy(frameId);
             if (!f) return;
-            membersOf(f).forEach((id) => {
-                const x = pinBy(id);
-                if (!x) return;
-                x.bx += dx;
-                x.by += dy;
-            });
+            list = membersOf(f);
             f.x += dx;
             f.y += dy;
         }
+        list.forEach((id) => {
+            const x = pinBy(id);
+            if (!x) return;
+            x.bx += dx;
+            x.by += dy;
+        });
         save();
     }
 
@@ -1627,13 +2234,15 @@
         "keydown",
         (e) => {
             if (board.hidden || !lightbox.hidden) return;
-            const ae = document.activeElement;
-            const typing = /INPUT|TEXTAREA|SELECT/.test(ae?.tagName);
             const handled = () => {
                 e.preventDefault();
                 e.stopImmediatePropagation();
             };
-            // the open board picker owns the keyboard (its list handles arrows / Enter)
+            // open menus and the board picker own the keyboard
+            if (openMenu) {
+                if (menuKeys(e)) e.stopImmediatePropagation();
+                return;
+            }
             if (pickOpen) {
                 if (e.key === "Escape") {
                     handled();
@@ -1641,16 +2250,29 @@
                 }
                 return;
             }
+            const ae = document.activeElement;
+            const typing = /INPUT|TEXTAREA|SELECT/.test(ae?.tagName) || ae?.isContentEditable;
+            const mod = e.ctrlKey || e.metaKey;
+            const key = e.key.toLowerCase();
+
             if (e.key === "Escape") {
                 handled();
+                if (!palette.hidden) return closePalette(true);
+                if (!linkbox.hidden && linkbox.contains(ae)) return closeLinkbox(true);
+                if (!find.hidden && find.contains(ae)) return closeFind(true);
                 if (popKey) return closePop(true);
                 if (cancelThreadFrom()) return announce("Thread cancelled");
                 if (typing) return ae.blur();
+                if (!tray.hidden) return closeTray(true);
+                if (clearSel()) return announce("Selection cleared");
+                if (closeFind(false)) return;
                 return closeBoard();
             }
+            if (mod && key === "f") {
+                handled();
+                return openFind();
+            }
             if (typing) return;
-            const mod = e.ctrlKey || e.metaKey;
-            const key = e.key.toLowerCase();
             if (mod && key === "z") {
                 handled();
                 return e.shiftKey ? redo() : undo();
@@ -1659,6 +2281,11 @@
                 handled();
                 return redo();
             }
+            if (mod && key === "a" && !readonly) {
+                handled();
+                setSel(B.pins.map((x) => x.id));
+                return announce(`${sel.size} selected`);
+            }
             if (mod || e.altKey) return;
 
             const card = ae?.classList?.contains("pb-card") ? ae : null;
@@ -1666,36 +2293,633 @@
             const knot = ae?.classList?.contains("pb-knot") ? ae : null;
             const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
 
-            if ((card || grip) && arrows[e.key] && !readonly) {
+            if (arrows[e.key] && !readonly && (card || grip || (sel.size && ae === area))) {
                 handled();
                 const step = e.shiftKey ? 60 : 12;
-                return keyMove(card ? "card" : "frame", card || grip, arrows[e.key][0] * step, arrows[e.key][1] * step);
+                const [ax, ay] = arrows[e.key];
+                if (grip) return keyMove([], ax * step, ay * step, grip.closest(".pb-frame").dataset.id);
+                const list = card && !sel.has(card.dataset.id) ? [card.dataset.id] : [...sel];
+                return keyMove(list.length ? list : [card.dataset.id], ax * step, ay * step);
             }
-            if (card && (e.key === "Delete" || e.key === "Backspace") && !readonly) {
-                handled();
-                const list = cards();
-                const next = list[list.indexOf(card) + 1] || list[list.indexOf(card) - 1];
-                remove(card.dataset.id);
-                announce("Unpinned. Ctrl+Z to undo.");
-                return (next || area).focus({ preventScroll: true });
-            }
-            if (knot && (e.key === "Delete" || e.key === "Backspace")) {
-                handled();
-                cutThread(knot.dataset.k);
-                return area.focus({ preventScroll: true });
+            if ((e.key === "Delete" || e.key === "Backspace") && !readonly) {
+                if (knot) {
+                    handled();
+                    cutThread(knot.dataset.k);
+                    return area.focus({ preventScroll: true });
+                }
+                const list = sel.size && (!card || sel.has(card.dataset.id)) ? [...sel] : card ? [card.dataset.id] : [];
+                if (list.length) {
+                    handled();
+                    const all = cards();
+                    const next = card && all[all.indexOf(card) + 1];
+                    removeWithNote(list);
+                    return (next && document.contains(next) ? next : area).focus({ preventScroll: true });
+                }
             }
             if (card && !readonly && (key === "t" || (e.key === "Enter" && threadFrom))) {
                 handled();
                 return threadFrom ? finishThreadTo(card.dataset.id) : startThreadFrom(card.dataset.id);
             }
-            if (e.key === "+" || e.key === "=") return handled(), zoomAt(goal.z * 1.25);
-            if (e.key === "-" || e.key === "_") return handled(), zoomAt(goal.z / 1.25);
-            if (e.key === "0") return handled(), zoomAt(1);
-            if (key === "f") return handled(), fit(true);
-            if (key === "g" && !readonly) return handled(), newFrame();
+            if (card && e.key === "Enter" && !readonly) {
+                handled();
+                return card.querySelector(".pb-note")?.focus();
+            }
+            const k = {
+                "+": () => zoomAt(goal.z * 1.25),
+                "=": () => zoomAt(goal.z * 1.25),
+                "-": () => zoomAt(goal.z / 1.25),
+                _: () => zoomAt(goal.z / 1.25),
+                0: () => zoomAt(1),
+                f: () => fit(true),
+                "/": openFind,
+                m: toggleMinimap,
+            };
+            const edit = {
+                g: () => (sel.size > 1 ? frameAround([...sel]) : newFrame()),
+                n: () => addNote(),
+                u: () => pickFiles(),
+                l: () => openLinkbox(),
+                w: () => (tray.hidden ? openTray() : closeTray(true)),
+            };
+            const fn = k[e.key] || k[key] || (!readonly && edit[key]);
+            if (fn) {
+                handled();
+                fn();
+            }
         },
         true
     );
+
+    /* ---------- adding things: uploads, notes, links, the wall tray ---------- */
+    const viewCenter = () => {
+        const r = area.getBoundingClientRect();
+        return [r.left + r.width / 2, r.top + r.height / 2];
+    };
+
+    let pickAt = null;
+    function pickFiles(at) {
+        if (readonly) return;
+        pickAt = at || null;
+        fileInput.click();
+    }
+    fileInput.addEventListener("change", () => {
+        const files = [...(fileInput.files || [])];
+        fileInput.value = "";
+        if (files.length) addUploads(files, pickAt);
+    });
+
+    async function addUploads(files, at) {
+        if (readonly) return;
+        files = [...files].filter((f) => f && /^image\//.test(f.type));
+        if (!files.length) return toast("Only images can be added to a board", "warn");
+        if (!window.media?.available) return toast("This browser can't store images, so uploads aren't available", "warn");
+        const [wx, wy] = worldAt(...(at || viewCenter()));
+        toast(files.length > 1 ? `Adding ${files.length} images…` : "Adding image…");
+        window.media.persist();
+        const made = [];
+        for (const [i, f] of files.slice(0, 60).entries()) {
+            try {
+                const { blob, w, h, color } = await window.media.processImage(f);
+                const id = newId("u");
+                await window.media.put(id, blob);
+                made.push(
+                    cleanItem({
+                        id,
+                        kind: "upload",
+                        media: { w, h, color, name: (f.name || "image").replace(/\.[a-z0-9]{2,5}$/i, "") },
+                        bx: wx - CARD_W / 2 + i * 26,
+                        by: wy - CARD_H / 2 + i * 26,
+                        r: rnd(),
+                        at: Date.now(),
+                    })
+                );
+            } catch (err) {
+                const quota = err?.name === "QuotaExceededError";
+                toast(quota ? "Image storage is full — remove some uploads first" : `${f.name}: ${err.message || "couldn't be added"}`, "warn");
+                if (quota || !/image|MB/.test(err?.message || "")) window.reportProblem?.("upload failed", err);
+                if (quota) break;
+            }
+        }
+        try {
+            localStorage.setItem(MEDIA_LAST, String(Date.now()));
+        } catch (e) {}
+        const added = insertItems(made);
+        if (!added.length) return;
+        setSel(added);
+        toast(added.length > 1 ? `Added ${added.length} images` : "Image added");
+        if (!reduceMotion) added.forEach((id) => cardEl(id) && gsap.from(cardEl(id), { scale: 0.85, duration: 0.6, ease: "back.out(2)" }));
+    }
+
+    // a link becomes an image card if it loads as an image, otherwise a bookmark
+    async function addLink(raw, at) {
+        if (readonly) return;
+        const href = safeUrl(raw);
+        if (!href) return toast("That doesn't look like a web address (it should start with https://)", "warn");
+        const [wx, wy] = worldAt(...(at || viewCenter()));
+        let src = null;
+        let w = 0;
+        let h = 0;
+        if (href.startsWith("https:")) {
+            const img = await window.media?.loadImage(href, false);
+            if (img) {
+                src = href;
+                w = img.naturalWidth;
+                h = img.naturalHeight;
+            }
+        }
+        const u = new URL(href);
+        let title;
+        try {
+            title = src ? decodeURIComponent(u.pathname.split("/").pop() || u.hostname) : `${u.hostname.replace(/^www\./, "")}${u.pathname !== "/" ? decodeURIComponent(u.pathname) : ""}`;
+        } catch (e) {
+            title = u.hostname;
+        }
+        const x = cleanItem({ id: newId("l"), kind: "link", media: { href, src, title, w, h }, bx: wx - CARD_W / 2, by: wy - (src ? CARD_H : 180) / 2, r: rnd(), at: Date.now() });
+        const added = insertItems([x]);
+        if (added.length) {
+            setSel(added);
+            toast(src ? "Image added from link" : "Link added");
+        }
+    }
+
+    function addNote(at, text = "") {
+        if (readonly) return;
+        const [wx, wy] = worldAt(...(at || viewCenter()));
+        const x = cleanItem({ id: newId("n"), kind: "note", note: text, tint: "sun", bx: wx - CARD_W / 2, by: wy - 100, r: rnd() / 2, at: Date.now() });
+        const added = insertItems([x]);
+        if (!added.length) return;
+        setSel(added);
+        requestAnimationFrame(() => cardEl(added[0])?.querySelector("textarea")?.focus({ preventScroll: true }));
+    }
+
+    /* link box */
+    let linkAt = null;
+    function openLinkbox(at) {
+        if (readonly) return;
+        linkAt = at || null;
+        linkbox.hidden = false;
+        linkInput.value = "";
+        linkInput.focus({ preventScroll: true });
+        if (!reduceMotion) gsap.fromTo(linkbox, { opacity: 0, y: -10 }, { opacity: 1, y: 0, duration: 0.3, ease: "expo.out" });
+    }
+    function closeLinkbox(refocus) {
+        if (linkbox.hidden) return false;
+        linkbox.hidden = true;
+        if (refocus) area.focus({ preventScroll: true });
+        return true;
+    }
+    function submitLink() {
+        const v = linkInput.value.trim();
+        if (!v) return;
+        closeLinkbox(true);
+        addLink(/^[a-z]+:\/\//i.test(v) ? v : `https://${v}`, linkAt);
+    }
+    linkInput.addEventListener("keydown", (e) => e.key === "Enter" && (e.preventDefault(), submitLink()));
+    q("#pb-link-add").addEventListener("click", submitLink);
+    q("#pb-link-cancel").addEventListener("click", () => closeLinkbox(true));
+
+    /* Add menu */
+    addBtn.addEventListener("click", () => (openMenu?.el === addMenu ? closeMenu(true) : showMenu(addMenu, { btn: addBtn })));
+    addMenu.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-add]");
+        if (!b) return;
+        closeMenu(false);
+        ({ image: () => pickFiles(), note: () => addNote(), link: () => openLinkbox(), wall: openTray })[b.dataset.add]?.();
+    });
+
+    /* drop files / links / images from other tabs */
+    let dropDepth = 0;
+    const dropKinds = (dt) => [...(dt?.types || [])].some((t) => t === "Files" || t === "text/uri-list" || t === "text/plain" || t === "text/html");
+    area.addEventListener("dragenter", (e) => {
+        if (readonly || !dropKinds(e.dataTransfer) || trayDrag) return;
+        e.preventDefault();
+        dropDepth++;
+        dropHint.hidden = false;
+    });
+    area.addEventListener("dragover", (e) => {
+        if (readonly || !dropKinds(e.dataTransfer) || trayDrag) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+    });
+    area.addEventListener("dragleave", () => {
+        dropDepth = Math.max(0, dropDepth - 1);
+        if (!dropDepth) dropHint.hidden = true;
+    });
+    area.addEventListener("drop", (e) => {
+        if (readonly || !e.dataTransfer) return;
+        e.preventDefault();
+        dropDepth = 0;
+        dropHint.hidden = true;
+        const at = [e.clientX, e.clientY];
+        const files = [...(e.dataTransfer.files || [])];
+        if (files.length) return addUploads(files, at);
+        // an image dragged from another page: prefer its src over the page link
+        const html = e.dataTransfer.getData("text/html");
+        const imgSrc = html && /<img[^>]+src=["']([^"']+)["']/i.exec(html)?.[1];
+        const uri = (e.dataTransfer.getData("text/uri-list") || "").split(/\r?\n/).find((l) => l && !l.startsWith("#"));
+        const text = e.dataTransfer.getData("text/plain");
+        const link = (imgSrc && safeUrl(imgSrc, true)) || uri || (safeUrl(text) ? text : null);
+        if (link) return addLink(link, at);
+        if (text?.trim()) addNote(at, text.trim().slice(0, 1000));
+    });
+
+    /* paste: images, links, or text as a note */
+    document.addEventListener("paste", (e) => {
+        if (board.hidden || readonly || !lightbox.hidden) return;
+        const ae = document.activeElement;
+        if (/INPUT|TEXTAREA/.test(ae?.tagName)) return;
+        const dt = e.clipboardData;
+        if (!dt) return;
+        const files = [...(dt.files || [])].filter((f) => /^image\//.test(f.type));
+        if (files.length) {
+            e.preventDefault();
+            return addUploads(files);
+        }
+        const text = (dt.getData("text/plain") || "").trim();
+        if (!text) return;
+        e.preventDefault();
+        if (/^https?:\/\/\S+$/i.test(text)) addLink(text);
+        else addNote(undefined, text.slice(0, 1000));
+    });
+
+    /* ---------- tray: photos from the wall ---------- */
+    let trayDrag = null;
+    function openTray() {
+        if (readonly) return;
+        buildTray();
+        tray.hidden = false;
+        q("#pb-tray-close").focus({ preventScroll: true });
+        if (!reduceMotion) gsap.fromTo(tray, { y: 40, opacity: 0 }, { y: 0, opacity: 1, duration: 0.45, ease: "expo.out" });
+    }
+    function closeTray(refocus) {
+        if (tray.hidden) return false;
+        tray.hidden = true;
+        if (refocus) area.focus({ preventScroll: true });
+        return true;
+    }
+    q("#pb-tray-close").addEventListener("click", () => closeTray(true));
+
+    function buildTray() {
+        trayList.textContent = "";
+        const list = state.photos.slice(0, 150);
+        if (!list.length) {
+            trayList.appendChild(mk("li", "pb-tray-empty", "Nothing on the wall yet — search for something first."));
+            return;
+        }
+        list.forEach((p) => {
+            const li = mk("li");
+            const b = mk("button", "pb-tray-item");
+            b.type = "button";
+            b.dataset.id = p.id;
+            b.dataset.cursor = "Add";
+            b.setAttribute("aria-label", `Add photo by ${p.user?.name || "Unknown"} to the board`);
+            b.style.setProperty("--c", hexOr(p.color, "#222222"));
+            const img = mk("img");
+            img.alt = "";
+            img.loading = "lazy";
+            img.draggable = false;
+            img.src = `${p.urls.raw}&w=160&h=200&fit=crop&crop=entropy&q=60&auto=format`;
+            b.appendChild(img);
+            li.appendChild(b);
+            trayList.appendChild(li);
+        });
+        syncTray();
+    }
+
+    function syncTray() {
+        if (tray.hidden) return;
+        qa(".pb-tray-item", trayList).forEach((b) => {
+            const on = has(b.dataset.id);
+            b.classList.toggle("is-pinned", on);
+            b.setAttribute("aria-pressed", on);
+        });
+    }
+
+    const photoById = (id) => state.photos.find((p) => p.id === id);
+
+    function addFromTray(id, at) {
+        const p = photoById(id);
+        if (!p) return;
+        if (has(id)) {
+            const g = geo.get(id);
+            if (g) flyTo(g.l + g.w / 2, g.t + g.h / 2);
+            return announce("Already on the board");
+        }
+        const [wx, wy] = worldAt(...(at || viewCenter()));
+        add(p, { x: wx - CARD_W / 2, y: wy - CARD_H / 2 });
+        setSel([id]);
+        announce(`Added photo by ${p.user?.name || "Unknown"}`);
+    }
+
+    trayList.addEventListener("pointerdown", (e) => {
+        const b = e.target.closest(".pb-tray-item");
+        if (!b || e.button !== 0) return;
+        e.preventDefault();
+        b.setPointerCapture(e.pointerId);
+        trayDrag = { b, id: b.dataset.id, pid: e.pointerId, sx: e.clientX, sy: e.clientY, ghost: null };
+    });
+    trayList.addEventListener("pointermove", (e) => {
+        const d = trayDrag;
+        if (!d || e.pointerId !== d.pid) return;
+        if (!d.ghost && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) > 6) {
+            d.ghost = mk("div", "pb-ghost");
+            d.ghost.style.backgroundImage = `url("${d.b.querySelector("img").src}")`;
+            document.body.appendChild(d.ghost);
+            area.classList.add("is-dropping");
+        }
+        if (d.ghost) {
+            const x = e.clientX;
+            const y = e.clientY;
+            onFrame(() => d.ghost && (d.ghost.style.transform = `translate(${x - 40}px, ${y - 50}px) rotate(-4deg)`));
+        }
+    });
+    function endTray(e) {
+        const d = trayDrag;
+        if (!d || e.pointerId !== d.pid) return;
+        trayDrag = null;
+        area.classList.remove("is-dropping");
+        if (!d.ghost) return addFromTray(d.id); // a click
+        d.ghost.remove();
+        const r = area.getBoundingClientRect();
+        const tr = tray.getBoundingClientRect();
+        const inArea = e.clientX > r.left && e.clientX < r.right && e.clientY > r.top && e.clientY < r.bottom;
+        const inTray = e.clientY > tr.top && e.clientX > tr.left && e.clientX < tr.right;
+        if (e.type === "pointerup" && inArea && !inTray) addFromTray(d.id, [e.clientX, e.clientY]);
+    }
+    trayList.addEventListener("pointerup", endTray);
+    trayList.addEventListener("pointercancel", endTray);
+    trayList.addEventListener("keydown", (e) => {
+        const b = e.target.closest(".pb-tray-item");
+        if (b && (e.key === "Enter" || e.key === " ")) {
+            e.preventDefault();
+            addFromTray(b.dataset.id);
+        }
+    });
+
+    /* ---------- find on the board ---------- */
+    let finds = [];
+    let findIdx = -1;
+    let findT = 0;
+
+    function flyTo(wx, wy, z = Math.max(goal.z, 0.75)) {
+        z = clampZ(z);
+        goTo({ z, x: area.clientWidth / 2 - wx * z, y: area.clientHeight / 2 - wy * z }, true);
+    }
+
+    const matchEl = (m) => (m.type === "card" ? cardEl(m.id) : m.type === "frame" ? frameEl(m.id) : knotEl(m.id));
+
+    function clearFindMarks() {
+        qa(".is-match, .is-hit", world).forEach((n) => n.classList.remove("is-match", "is-hit"));
+    }
+
+    function openFind() {
+        find.hidden = false;
+        findInput.focus({ preventScroll: true });
+        findInput.select();
+        if (!reduceMotion) gsap.fromTo(find, { opacity: 0, y: -10 }, { opacity: 1, y: 0, duration: 0.3, ease: "expo.out" });
+        if (findInput.value) runFind();
+    }
+
+    function closeFind(refocus) {
+        if (find.hidden) return false;
+        find.hidden = true;
+        clearFindMarks();
+        finds = [];
+        if (refocus) area.focus({ preventScroll: true });
+        return true;
+    }
+
+    function runFind() {
+        clearFindMarks();
+        const qv = findInput.value.trim().toLowerCase();
+        finds = [];
+        if (qv) {
+            B.pins.forEach((x) => {
+                const hay = [x.note, labelOf(x), x.query, x.photo?.alt_description, x.photo?.description, x.media?.title, x.media?.href, x.media?.name].join(" ").toLowerCase();
+                if (hay.includes(qv)) finds.push({ type: "card", id: x.id });
+            });
+            B.frames.forEach((f) => f.title.toLowerCase().includes(qv) && finds.push({ type: "frame", id: f.id }));
+            B.threads.forEach((t) => t.label.toLowerCase().includes(qv) && finds.push({ type: "thread", id: tkey(t.a, t.b) }));
+        }
+        finds.forEach((m) => matchEl(m)?.classList.add("is-match"));
+        findCount.textContent = finds.length ? `1/${finds.length}` : qv ? "0/0" : "";
+        findIdx = -1;
+        if (finds.length) goFind(0);
+        else if (qv) announce("No matches");
+    }
+
+    function goFind(i) {
+        if (!finds.length) return;
+        findIdx = (i + finds.length) % finds.length;
+        findCount.textContent = `${findIdx + 1}/${finds.length}`;
+        qa(".is-hit", world).forEach((n) => n.classList.remove("is-hit"));
+        const m = finds[findIdx];
+        matchEl(m)?.classList.add("is-hit");
+        let p = null;
+        if (m.type === "card") {
+            const g = geo.get(m.id);
+            if (g) p = [g.l + g.w / 2, g.t + g.h / 2];
+        } else if (m.type === "frame") {
+            const f = frameBy(m.id);
+            if (f) p = [f.x + f.w / 2, f.y + f.h / 2];
+        } else p = knotPoint(threadBy(m.id));
+        if (p) flyTo(p[0], p[1]);
+        announce(`Match ${findIdx + 1} of ${finds.length}`);
+    }
+
+    findInput.addEventListener("input", () => {
+        clearTimeout(findT);
+        findT = setTimeout(runFind, 140);
+    });
+    findInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            if (findIdx < 0) runFind();
+            else goFind(findIdx + (e.shiftKey ? -1 : 1));
+        }
+    });
+    q("#pb-find-next").addEventListener("click", () => goFind(findIdx + 1));
+    q("#pb-find-prev").addEventListener("click", () => goFind(findIdx - 1));
+    q("#pb-find-close").addEventListener("click", () => closeFind(true));
+    findBtn.addEventListener("click", () => (find.hidden ? openFind() : closeFind(true)));
+
+    /* ---------- minimap ---------- */
+    const MM_W = 200;
+    const MM_H = 128;
+    let mmOn = true;
+    try {
+        mmOn = localStorage.getItem("aperture:minimap") !== "off";
+    } catch (e) {}
+    let mmQueued = false;
+    let mm = null; // last mapping { s, ox, oy }
+
+    function scheduleMinimap() {
+        if (mmQueued || board.hidden) return;
+        mmQueued = true;
+        requestAnimationFrame(drawMinimap);
+    }
+
+    function toggleMinimap() {
+        mmOn = !mmOn;
+        try {
+            localStorage.setItem("aperture:minimap", mmOn ? "on" : "off");
+        } catch (e) {}
+        announce(mmOn ? "Minimap shown" : "Minimap hidden");
+        scheduleMinimap();
+    }
+
+    function drawMinimap() {
+        mmQueued = false;
+        const box = contentBox();
+        const show = mmOn && !!box && !board.hidden;
+        minimap.hidden = !show;
+        if (!show) return;
+        const dpr = Math.min(devicePixelRatio || 1, 2);
+        if (minimap.width !== MM_W * dpr) {
+            minimap.width = MM_W * dpr;
+            minimap.height = MM_H * dpr;
+        }
+        const ctx = minimap.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, MM_W, MM_H);
+        const vw = area.clientWidth;
+        const vh = area.clientHeight;
+        const vr = { l: -view.x / view.z, t: -view.y / view.z, r: (vw - view.x) / view.z, b: (vh - view.y) / view.z };
+        const u = { l: Math.min(box.l, vr.l), t: Math.min(box.t, vr.t), r: Math.max(box.r, vr.r), b: Math.max(box.b, vr.b) };
+        let s = Math.min((MM_W - 16) / (u.r - u.l), (MM_H - 16) / (u.b - u.t));
+        let ox = (MM_W - (u.r - u.l) * s) / 2 - u.l * s;
+        let oy = (MM_H - (u.b - u.t) * s) / 2 - u.t * s;
+        // while dragging on the map, keep its scale still so it doesn't slide under the pointer
+        if (mmDrag != null && mm) ({ s, ox, oy } = mm);
+        mm = { s, ox, oy };
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "rgba(236, 231, 220, 0.25)";
+        B.frames.forEach((f) => ctx.strokeRect(ox + f.x * s + 0.5, oy + f.y * s + 0.5, f.w * s, f.h * s));
+        ctx.strokeStyle = "rgba(255, 91, 46, 0.7)";
+        ctx.beginPath();
+        B.threads.forEach((t) => {
+            const a = pinPoint(t.a);
+            const b = pinPoint(t.b);
+            if (!a || !b) return;
+            ctx.moveTo(ox + a[0] * s, oy + a[1] * s);
+            ctx.lineTo(ox + b[0] * s, oy + b[1] * s);
+        });
+        ctx.stroke();
+        B.pins.forEach((x) => {
+            const g = geo.get(x.id);
+            if (!g) return;
+            ctx.fillStyle = sel.has(x.id) ? "#ff5b2e" : colorOf(x);
+            ctx.fillRect(ox + g.l * s, oy + g.t * s, Math.max(2, g.w * s), Math.max(2, g.h * s));
+        });
+        ctx.fillStyle = "rgba(236, 231, 220, 0.06)";
+        ctx.strokeStyle = "rgba(236, 231, 220, 0.85)";
+        const vx = ox + vr.l * s;
+        const vy = oy + vr.t * s;
+        ctx.fillRect(vx, vy, (vr.r - vr.l) * s, (vr.b - vr.t) * s);
+        ctx.strokeRect(vx + 0.5, vy + 0.5, (vr.r - vr.l) * s - 1, (vr.b - vr.t) * s - 1);
+    }
+
+    // click / drag on the minimap moves the view there
+    let mmDrag = null;
+    function mmMove(e, animate) {
+        if (!mm) return;
+        const r = minimap.getBoundingClientRect();
+        const wx = (e.clientX - r.left - mm.ox) / mm.s;
+        const wy = (e.clientY - r.top - mm.oy) / mm.s;
+        const z = goal.z;
+        if (animate) goTo({ z, x: area.clientWidth / 2 - wx * z, y: area.clientHeight / 2 - wy * z }, true);
+        else setViewNow(area.clientWidth / 2 - wx * view.z, area.clientHeight / 2 - wy * view.z);
+    }
+    minimap.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        minimap.setPointerCapture(e.pointerId);
+        mmDrag = e.pointerId;
+        mmMove(e, true);
+    });
+    minimap.addEventListener("pointermove", (e) => {
+        if (mmDrag !== e.pointerId) return;
+        onFrame(() => mmMove(e, false));
+    });
+    const mmEnd = (e) => mmDrag === e.pointerId && (mmDrag = null);
+    minimap.addEventListener("pointerup", mmEnd);
+    minimap.addEventListener("pointercancel", mmEnd);
+
+    /* ---------- palette ---------- */
+    let palKey = "";
+    let palCols = [];
+
+    function closePalette(refocus) {
+        if (palette.hidden) return false;
+        palette.hidden = true;
+        paletteBtn.setAttribute("aria-expanded", "false");
+        if (refocus) paletteBtn.focus({ preventScroll: true });
+        return true;
+    }
+
+    async function openPalette() {
+        closeMenu(false);
+        palette.hidden = false;
+        paletteBtn.setAttribute("aria-expanded", "true");
+        const r = paletteBtn.getBoundingClientRect();
+        palette.style.left = `${clamp(8, Math.max(8, innerWidth - palette.offsetWidth - 8), r.left)}px`;
+        palette.style.top = `${r.bottom + 8}px`;
+        if (!reduceMotion) gsap.fromTo(palette, { opacity: 0, y: -6 }, { opacity: 1, y: 0, duration: 0.28, ease: "expo.out" });
+        const items = B.pins.filter((x) => x.kind !== "note" && !(x.kind === "link" && !x.media.src)).slice(0, 48);
+        const key = items.map((x) => x.id).join(",");
+        if (!items.length) return showSwatches([], "Add photos to the board to see its palette.");
+        if (key === palKey && palCols.length) return showSwatches(palCols);
+        swatches.textContent = "";
+        swatches.appendChild(mk("li", "pb-swatch-note", "Reading colours…"));
+        const sources = (
+            await Promise.all(
+                items.map(async (x) => {
+                    if (x.kind === "unsplash") return { src: `${x.photo.urls.raw}&w=60&h=75&fit=crop&q=50&auto=format`, cors: true };
+                    if (x.kind === "upload") return { src: await window.media?.url(x.id), cors: false };
+                    return { src: x.media.src, cors: true };
+                })
+            )
+        ).filter((s) => s.src);
+        palCols = await window.media.palette(sources, 6, items.map(colorOf));
+        palKey = key;
+        if (!palette.hidden) showSwatches(palCols);
+    }
+
+    function showSwatches(cols, empty) {
+        swatches.textContent = "";
+        if (!cols.length) return swatches.appendChild(mk("li", "pb-swatch-note", empty || "No colours found."));
+        cols.forEach((c) => {
+            const li = mk("li");
+            const b = mk("button", "pb-swatch");
+            b.type = "button";
+            b.style.setProperty("--sw", c.hex);
+            b.setAttribute("aria-label", `Copy ${c.hex}`);
+            b.append(mk("i"), mk("span", "mono", c.hex.toUpperCase()), mk("small", "mono", `${Math.round(c.share * 100)}%`));
+            b.addEventListener("click", () => copyText(c.hex.toUpperCase(), `Copied ${c.hex.toUpperCase()}`));
+            li.appendChild(b);
+            swatches.appendChild(li);
+        });
+        swatches.querySelector("button")?.focus({ preventScroll: true });
+    }
+
+    async function copyText(text, msg) {
+        try {
+            await navigator.clipboard.writeText(text);
+            toast(msg);
+        } catch (e) {
+            window.prompt("Copy:", text);
+        }
+    }
+
+    paletteBtn.addEventListener("click", () => (palette.hidden ? openPalette() : closePalette(true)));
+    q("#pb-palette-copy").addEventListener("click", () => {
+        if (!palCols.length) return;
+        const slugName = B.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "board";
+        copyText(`:root {\n${palCols.map((c, i) => `    --${slugName}-${i + 1}: ${c.hex};`).join("\n")}\n}`, "Copied the palette as CSS");
+    });
+    document.addEventListener("pointerdown", (e) => {
+        if (!palette.hidden && !palette.contains(e.target) && !paletteBtn.contains(e.target)) closePalette(false);
+    });
 
     /* ---------- open / close ---------- */
     let opening = false;
@@ -1713,23 +2937,31 @@
             hadView = true;
             fit(false);
         } else applyView();
+        scheduleMinimap();
         if (!reduceMotion) {
             gsap.fromTo(board, { opacity: 0 }, { opacity: 1, duration: 0.45, ease: "power2.out" });
             gsap.fromTo(".pb-head > *", { y: -24, opacity: 0 }, { y: 0, opacity: 1, duration: 0.8, stagger: 0.06, ease: "expo.out" });
             gsap.fromTo([strings, knots, framesLayer], { opacity: 0 }, { opacity: 1, duration: 0.6, delay: 0.5, ease: "power2.out" });
             gsap.fromTo(
                 cards(),
-                { y: -90, opacity: 0, rotate: (i, el) => parseFloat(getComputedStyle(el).getPropertyValue("--r")) * 5 || 8 },
+                { y: -90, opacity: 0, rotate: (i, c) => parseFloat(getComputedStyle(c).getPropertyValue("--r")) * 5 || 8 },
                 { y: 0, opacity: 1, rotate: 0, duration: 0.9, stagger: 0.04, ease: "back.out(1.5)", clearProps: "transform" }
             );
         }
         q("#pb-close").focus({ preventScroll: true });
+        document.dispatchEvent(new CustomEvent("pins:open", { detail: { readonly, count: B.pins.length } }));
     }
 
     function closeBoard(then) {
         if (board.hidden) return then?.();
+        document.dispatchEvent(new CustomEvent("pins:close"));
         closePicker(false);
+        closeMenu(false);
+        closePalette(false);
         closePop(false);
+        closeLinkbox(false);
+        closeFind(false);
+        closeTray(false);
         cancelThreadFrom();
         const done = () => {
             board.hidden = true;
@@ -1747,8 +2979,9 @@
     q("#pb-close").addEventListener("click", () => closeBoard());
     q("#pb-tidy").addEventListener("click", tidy);
     undoBtn.addEventListener("click", undo);
+    exportBtn.addEventListener("click", () => (openMenu?.el === exportMenu ? closeMenu(true) : showMenu(exportMenu, { btn: exportBtn })));
 
-    /* ---------- JSON export / import ---------- */
+    /* ---------- JSON export / import (uploads travel inside the file) ---------- */
     const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "board";
     function download(blob, name) {
         const a = document.createElement("a");
@@ -1758,24 +2991,46 @@
         setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     }
 
-    q("#pb-export").addEventListener("click", () => {
-        const data = { app: "aperture", version: 3, name: B.name, pins: B.pins, threads: B.threads, frames: B.frames };
-        download(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }), `aperture-${slug(B.name)}-${new Date().toISOString().slice(0, 10)}.json`);
+    q("#pb-export").addEventListener("click", async () => {
+        closeMenu(false);
+        const mediaData = {};
+        for (const x of B.pins) {
+            if (x.kind !== "upload") continue;
+            const blob = await window.media?.get(x.id).catch(() => null);
+            if (blob) mediaData[x.id] = await window.media.blobToDataURL(blob);
+        }
+        const data = { app: "aperture", version: 4, name: B.name, pins: B.pins, threads: B.threads, frames: B.frames, media: mediaData };
+        download(new Blob([JSON.stringify(data)], { type: "application/json" }), `aperture-${slug(B.name)}-${new Date().toISOString().slice(0, 10)}.json`);
+        toast("Board file saved");
     });
 
     // imports merge into the current board
     q("#pb-import").addEventListener("change", async (e) => {
         const file = e.target.files?.[0];
         e.target.value = "";
+        closeMenu(false);
         if (!file || readonly) return;
         try {
-            if (file.size > 5e6) throw new Error("file too large");
-            const data = cleanBoard(JSON.parse(await file.text()));
+            if (file.size > 80e6) throw new Error("file too large");
+            const raw = JSON.parse(await file.text());
+            const data = cleanBoard(raw);
+            const mediaData = raw && typeof raw.media === "object" && raw.media ? raw.media : {};
             const before = snapshot();
-            const fresh = data.pins.filter((x) => !has(x.photo.id));
+            const fresh = [];
+            for (const x of data.pins) {
+                if (has(x.id)) continue;
+                if (x.kind === "upload") {
+                    try {
+                        await window.media.put(x.id, await window.media.dataURLToBlob(mediaData[x.id]));
+                    } catch (err) {
+                        continue; // no image data for this upload: leave it out
+                    }
+                }
+                fresh.push(x);
+            }
             fresh.forEach((x) => {
                 B.pins.push(x);
-                ids.add(x.photo.id);
+                ids.add(x.id);
             });
             let tied = 0;
             data.threads.forEach((t) => {
@@ -1789,15 +3044,16 @@
                 checkpoint(before);
                 save();
             }
-            announce(`Imported ${fresh.length} photo${fresh.length === 1 ? "" : "s"}, ${tied} thread${tied === 1 ? "" : "s"}, ${data.frames.length} group${data.frames.length === 1 ? "" : "s"}`);
+            toast(`Imported ${fresh.length} item${fresh.length === 1 ? "" : "s"}, ${tied} thread${tied === 1 ? "" : "s"}, ${data.frames.length} group${data.frames.length === 1 ? "" : "s"}`);
         } catch (err) {
-            console.warn("[aperture] board import failed:", err);
-            announce("That file couldn't be imported");
+            window.reportProblem?.("board import failed", err);
+            toast("That file couldn't be imported", "warn");
         }
     });
 
     /* ---------- share as a link ---------- */
-    // the whole board is compressed into the URL fragment, so nothing is uploaded anywhere
+    // the board is compressed into the URL fragment, so nothing is uploaded
+    // anywhere. Uploaded images can't fit in a link and are left out.
     const b64u = (bytes) => {
         let s = "";
         for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
@@ -1844,57 +3100,61 @@
     }
 
     function packBoard() {
-        const at = new Map(B.pins.map((x, i) => [x.photo.id, i]));
+        const items = B.pins.filter((x) => x.kind !== "upload");
+        const at = new Map(items.map((x, i) => [x.id, i]));
+        const pos = (x) => [Math.round(x.bx), Math.round(x.by), x.r];
         return {
-            v: 1,
+            v: 2,
             n: B.name,
-            p: B.pins.map((x) => [
-                x.photo.id,
-                x.photo.urls.raw.slice(HOST.length),
-                x.photo.color,
-                x.photo.width,
-                x.photo.height,
-                x.photo.user.name,
-                x.photo.user.username,
-                x.photo.alt_description.slice(0, 120),
-                x.note,
-                Math.round(x.bx),
-                Math.round(x.by),
-                x.r,
-                x.query,
-            ]),
-            t: B.threads.map((t) => [at.get(t.a), at.get(t.b), t.label]),
+            i: items.map((x) => {
+                if (x.kind === "unsplash") {
+                    const p = x.photo;
+                    return ["s", p.id, p.urls.raw.slice(HOST.length), p.color, p.width, p.height, p.user.name, p.user.username, p.alt_description.slice(0, 120), x.note, ...pos(x), x.query];
+                }
+                if (x.kind === "link") return ["l", x.id, x.media.href, x.media.src || "", x.media.title, x.note, ...pos(x)];
+                return ["n", x.id, x.note, x.tint, ...pos(x)];
+            }),
+            t: B.threads.filter((t) => at.has(t.a) && at.has(t.b)).map((t) => [at.get(t.a), at.get(t.b), t.label]),
             f: B.frames.map((f) => [Math.round(f.x), Math.round(f.y), Math.round(f.w), Math.round(f.h), f.title]),
+            skipped: B.pins.length - items.length,
         };
     }
 
+    const unsplashFromArr = (a) => ({
+        kind: "unsplash",
+        photo: { id: a[1], urls: { raw: HOST + str(a[2], 600) }, color: a[3], width: a[4], height: a[5], user: { name: a[6], username: a[7] }, alt_description: a[8] },
+        note: a[9],
+        bx: a[10],
+        by: a[11],
+        r: a[12],
+        query: a[13],
+    });
+
     function unpackBoard(d) {
-        if (!d || d.v !== 1 || !Array.isArray(d.p)) throw new Error("not a board");
-        const pins = d.p.slice(0, MAX_PINS).map((a) =>
-            Array.isArray(a)
-                ? {
-                      photo: {
-                          id: a[0],
-                          urls: { raw: HOST + str(a[1], 600) },
-                          color: a[2],
-                          width: a[3],
-                          height: a[4],
-                          user: { name: a[5], username: a[6] },
-                          alt_description: a[7],
-                      },
-                      note: a[8],
-                      bx: a[9],
-                      by: a[10],
-                      r: a[11],
-                      query: a[12],
-                  }
-                : null
-        );
-        const idAt = (i) => (Number.isInteger(i) ? pins[i]?.photo?.id : undefined);
+        if (!d || !(d.v === 1 || d.v === 2)) throw new Error("not a board");
+        let items;
+        if (d.v === 1) {
+            if (!Array.isArray(d.p)) throw new Error("not a board");
+            // v1: unsplash only, [id, raw, color, w, h, name, username, alt, note, bx, by, r, query]
+            items = d.p.slice(0, MAX_PINS).map((a) => (Array.isArray(a) ? unsplashFromArr(["s", ...a]) : null));
+        } else {
+            if (!Array.isArray(d.i)) throw new Error("not a board");
+            items = d.i.slice(0, MAX_PINS).map((a) => {
+                if (!Array.isArray(a)) return null;
+                if (a[0] === "s") return unsplashFromArr(a);
+                if (a[0] === "l") return { kind: "link", id: a[1], media: { href: a[2], src: a[3] || null, title: a[4] }, note: a[5], bx: a[6], by: a[7], r: a[8] };
+                if (a[0] === "n") return { kind: "note", id: a[1], note: a[2], tint: a[3], bx: a[4], by: a[5], r: a[6] };
+                return null;
+            });
+        }
+        const idAt = (i) => {
+            const x = Number.isInteger(i) ? items[i] : null;
+            return x ? x.id || x.photo?.id : undefined;
+        };
         return cleanBoard(
             {
                 name: d.n,
-                pins,
+                pins: items,
                 threads: (Array.isArray(d.t) ? d.t : []).map((t) => (Array.isArray(t) ? { a: idAt(t[0]), b: idAt(t[1]), label: t[2] } : null)),
                 frames: (Array.isArray(d.f) ? d.f : []).map((f) => (Array.isArray(f) ? { x: f[0], y: f[1], w: f[2], h: f[3], title: f[4] } : null)),
             },
@@ -1903,10 +3163,12 @@
     }
 
     shareBtn.addEventListener("click", async () => {
-        if (!B.pins.length) return announce("Pin something first — an empty board has nothing to share");
+        if (!B.pins.length) return toast("Add something first — an empty board has nothing to share");
         const label = shareBtn.firstChild;
         try {
-            const url = `${location.origin}${location.pathname}#board=${await pack(packBoard())}`;
+            const packed = packBoard();
+            if (!packed.i.length) return toast("Uploaded images can't go in a share link. Export the board file instead.", "warn");
+            const url = `${location.origin}${location.pathname}#board=${await pack(packed)}`;
             let copied = false;
             try {
                 await navigator.clipboard.writeText(url);
@@ -1915,11 +3177,14 @@
             if (!copied) window.prompt("Copy this link to share the board:", url);
             const kb = Math.round(url.length / 1024);
             label.textContent = copied ? "Link copied ✓" : "Share";
-            announce(copied ? `Share link copied${kb > 6 ? ` — it's long (${kb} KB), some chat apps may cut it` : ""}` : "Share link ready");
+            const notes = [];
+            if (packed.skipped) notes.push(`${packed.skipped} uploaded image${packed.skipped === 1 ? " isn't" : "s aren't"} included`);
+            if (kb > 6) notes.push(`it's long (${kb} KB), so some chat apps may cut it`);
+            if (copied) toast(`Share link copied${notes.length ? ` — ${notes.join("; ")}` : ""}`, notes.length ? "warn" : "");
             setTimeout(() => (label.textContent = "Share"), 2200);
         } catch (err) {
-            console.warn("[aperture] share failed:", err);
-            announce("Couldn't make a share link in this browser");
+            window.reportProblem?.("share failed", err);
+            toast("Couldn't make a share link in this browser", "warn");
         }
     });
 
@@ -1927,6 +3192,7 @@
         readonly = true;
         B = data;
         reindex();
+        clearSel();
         board.classList.add("is-readonly");
         sharedBar.hidden = false;
         q("#pb-shared-name").textContent = data.name;
@@ -1957,7 +3223,7 @@
         index.list.push({ id, name: copy.name });
         store.set(vkey(id), goal);
         switchBoard(id);
-        announce(`Saved as “${copy.name}” in your boards`);
+        toast(`Saved as “${copy.name}” in your boards`);
     });
 
     async function openSharedFromHash() {
@@ -1970,8 +3236,8 @@
         try {
             data = unpackBoard(await unpack(m[1]));
         } catch (err) {
-            console.warn("[aperture] shared board link is broken:", err);
-            return;
+            window.reportProblem?.("broken share link", err);
+            return toast("That shared board link is broken or incomplete", "warn");
         }
         // wait for the first page so the canvas (which hosts the board) can open
         const t0 = Date.now();
@@ -1981,27 +3247,20 @@
             clearInterval(wait);
             if (!ready) return;
             window.canvasView.open();
-            setTimeout(() => {
-                enterShared(data);
-                if (board.hidden) openBoard();
-                else fit(false);
-            }, reduceMotion ? 0 : 1100);
+            setTimeout(
+                () => {
+                    enterShared(data);
+                    if (board.hidden) openBoard();
+                    else fit(false);
+                },
+                reduceMotion ? 0 : 1100
+            );
         }, 100);
     }
     openSharedFromHash();
     window.addEventListener("hashchange", openSharedFromHash);
 
     /* ---------- export as an image ---------- */
-    const loadImg = (src) =>
-        new Promise((res) => {
-            const img = new Image();
-            img.crossOrigin = "anonymous";
-            const t = setTimeout(() => res(null), 10000);
-            img.onload = () => (clearTimeout(t), res(img));
-            img.onerror = () => (clearTimeout(t), res(null));
-            img.src = src;
-        });
-
     function rrect(ctx, x, y, w, h, r) {
         ctx.beginPath();
         if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
@@ -2024,12 +3283,33 @@
         if (line) ctx.fillText(line, x, y + n * lineH, maxW);
     }
 
-    q("#pb-image").addEventListener("click", async (e) => {
-        const btn = e.currentTarget;
+    // draw img to fill (x, y, w, h) like object-fit: cover
+    function drawCover(ctx, img, x, y, w, h) {
+        const iw = img.naturalWidth || img.width;
+        const ih = img.naturalHeight || img.height;
+        const s = Math.max(w / iw, h / ih);
+        const sw = w / s;
+        const sh = h / s;
+        ctx.drawImage(img, (iw - sw) / 2, (ih - sh) / 2, sw, sh, x, y, w, h);
+    }
+
+    // Unsplash asks apps to report downloads; a board image uses the photos in it
+    function trackDownloads(list) {
+        list.forEach((x, i) => {
+            let ixid = null;
+            try {
+                ixid = new URL(x.photo.urls.raw).searchParams.get("ixid");
+            } catch (e) {}
+            setTimeout(() => api(`/photos/${x.photo.id}/download`, ixid ? { ixid } : {}).catch(() => {}), i * 120);
+        });
+    }
+
+    imageBtn.addEventListener("click", async () => {
+        closeMenu(false);
         const box = contentBox();
-        if (!box) return announce("Nothing on the board to export yet");
-        btn.disabled = true;
-        announce("Rendering image…");
+        if (!box) return toast("Nothing on the board to export yet");
+        imageBtn.disabled = true;
+        toast("Rendering image…");
         try {
             const css = getComputedStyle(document.documentElement);
             const v = (n, fb) => css.getPropertyValue(n).trim() || fb;
@@ -2072,73 +3352,102 @@
                 ctx.restore();
             });
 
-            const imgs = new Map(await Promise.all(B.pins.map(async (x) => [x.photo.id, await loadImg(cardSrc(x.photo))])));
+            const imgs = new Map(
+                await Promise.all(
+                    B.pins.map(async (x) => {
+                        if (x.kind === "unsplash") return [x.id, await window.media.loadImage(cardSrc(x.photo), true)];
+                        if (x.kind === "upload") {
+                            const u = await window.media?.url(x.id);
+                            return [x.id, u ? await window.media.loadImage(u, false) : null];
+                        }
+                        if (x.kind === "link" && x.media.src) return [x.id, await window.media.loadImage(x.media.src, true)];
+                        return [x.id, null];
+                    })
+                )
+            );
             const order = cards().sort((a, b) => (+a.style.zIndex || 0) - (+b.style.zIndex || 0));
-            order.forEach((el) => {
-                const x = pinBy(el.dataset.id);
-                if (!x) return;
-                const w = el.offsetWidth;
-                const h = el.offsetHeight;
+            order.forEach((c) => {
+                const x = pinBy(c.dataset.id);
+                const g = geo.get(c.dataset.id);
+                if (!x || !g) return;
+                const { w, h } = g;
                 ctx.save();
-                ctx.translate(el.offsetLeft + w / 2, el.offsetTop + h / 2);
+                ctx.translate(g.l + w / 2, g.t + h / 2);
                 ctx.rotate(((x.r || 0) * Math.PI) / 180);
                 ctx.translate(-w / 2, -h / 2);
                 ctx.shadowColor = "rgba(0, 0, 0, 0.55)";
                 ctx.shadowBlur = 30;
                 ctx.shadowOffsetY = 14;
                 rrect(ctx, 0, 0, w, h, 3);
-                ctx.fillStyle = paper;
+                ctx.fillStyle = x.kind === "note" ? TINT_HEX[x.tint] : paper;
                 ctx.fill();
                 ctx.shadowColor = "transparent";
-                const iw = w - 20;
-                const ih = iw * 1.25;
-                ctx.fillStyle = x.photo.color;
-                ctx.fillRect(10, 10, iw, ih);
-                const img = imgs.get(x.photo.id);
-                if (img) ctx.drawImage(img, 10, 10, iw, ih);
                 ctx.textBaseline = "top";
-                ctx.fillStyle = bg;
-                ctx.font = `italic 19px ${serif}`;
-                wrapText(ctx, x.note, 10, ih + 18, iw, 20, 2);
-                ctx.font = `10px ${mono}`;
-                ctx.fillStyle = "rgba(13, 12, 10, 0.55)";
-                ctx.fillText(x.photo.user.name.toUpperCase(), 10, ih + 62, iw * 0.55);
-                ctx.textAlign = "right";
-                ctx.fillText(fromLabel(x).toUpperCase(), w - 10, ih + 62, iw * 0.42);
+                const iw = w - 20;
+                if (x.kind === "note") {
+                    ctx.fillStyle = bg;
+                    ctx.font = `italic 22px ${serif}`;
+                    wrapText(ctx, x.note, 16, 26, w - 32, 23, Math.max(1, Math.floor((h - 50) / 23)));
+                } else {
+                    const bookmark = x.kind === "link" && !x.media.src;
+                    const mediaEl = c.querySelector("img, .pb-bookmark");
+                    const ih = mediaEl ? mediaEl.offsetHeight : iw * 1.25;
+                    ctx.fillStyle = bookmark ? "#1d1b18" : colorOf(x);
+                    ctx.fillRect(10, 10, iw, ih);
+                    const img = imgs.get(x.id);
+                    if (img) drawCover(ctx, img, 10, 10, iw, ih);
+                    if (bookmark) {
+                        ctx.fillStyle = paper;
+                        ctx.font = `italic 26px ${serif}`;
+                        wrapText(ctx, hostOf(x.media.href), 22, 26, iw - 24, 28, 2);
+                        ctx.font = `10px ${mono}`;
+                        ctx.fillStyle = "rgba(236, 231, 220, 0.6)";
+                        wrapText(ctx, x.media.title, 22, ih - 34, iw - 24, 12, 2);
+                    }
+                    ctx.fillStyle = bg;
+                    ctx.font = `italic 19px ${serif}`;
+                    wrapText(ctx, x.note, 10, ih + 18, iw, 20, 2);
+                    ctx.font = `10px ${mono}`;
+                    ctx.fillStyle = "rgba(13, 12, 10, 0.55)";
+                    const left = x.kind === "unsplash" ? x.photo.user.name : x.kind === "upload" ? x.media.name || "Your image" : hostOf(x.media.href);
+                    ctx.fillText(left.toUpperCase(), 10, ih + 62, iw * 0.55);
+                    ctx.textAlign = "right";
+                    ctx.fillText(fromLabel(x).toUpperCase(), w - 10, ih + 62, iw * 0.42);
+                }
                 ctx.restore();
+                const p = pinPoint(x.id);
+                if (p) {
+                    const pg = ctx.createRadialGradient(p[0] - 3, p[1] - 3, 1, p[0], p[1], 8);
+                    pg.addColorStop(0, "#ffb299");
+                    pg.addColorStop(0.45, accent);
+                    pg.addColorStop(1, "#b8340f");
+                    ctx.fillStyle = pg;
+                    ctx.beginPath();
+                    ctx.arc(p[0], p[1], 8, 0, Math.PI * 2);
+                    ctx.fill();
+                }
             });
 
             ctx.save();
-            ctx.strokeStyle = accent;
-            ctx.lineWidth = 2.2;
             ctx.lineCap = "round";
-            ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-            ctx.shadowBlur = 4;
-            ctx.shadowOffsetY = 4;
             B.threads.forEach((t) => {
                 const a = pinPoint(t.a);
                 const b = pinPoint(t.b);
                 if (!a || !b) return;
                 const c = ctrlOf(a, b);
-                ctx.beginPath();
-                ctx.moveTo(a[0], a[1]);
-                ctx.quadraticCurveTo(c[0], c[1], b[0], b[1]);
-                ctx.stroke();
+                [
+                    ["rgba(0, 0, 0, 0.38)", 3, 3],
+                    [accent, 2.2, 0],
+                ].forEach(([col, lw, dy]) => {
+                    ctx.strokeStyle = col;
+                    ctx.lineWidth = lw;
+                    ctx.beginPath();
+                    ctx.moveTo(a[0], a[1] + dy);
+                    ctx.quadraticCurveTo(c[0], c[1] + dy, b[0], b[1] + dy);
+                    ctx.stroke();
+                });
             });
             ctx.restore();
-
-            B.pins.forEach((x) => {
-                const p = pinPoint(x.photo.id);
-                if (!p) return;
-                const g = ctx.createRadialGradient(p[0] - 3, p[1] - 3, 1, p[0], p[1], 8);
-                g.addColorStop(0, "#ffb299");
-                g.addColorStop(0.45, accent);
-                g.addColorStop(1, "#b8340f");
-                ctx.fillStyle = g;
-                ctx.beginPath();
-                ctx.arc(p[0], p[1], 8, 0, Math.PI * 2);
-                ctx.fill();
-            });
 
             ctx.font = `500 12px ${mono}`;
             ctx.textBaseline = "middle";
@@ -2160,19 +3469,46 @@
             ctx.textBaseline = "alphabetic";
             ctx.font = `12px ${mono}`;
             ctx.fillStyle = "rgba(236, 231, 220, 0.5)";
-            ctx.fillText(`${B.name.toUpperCase()} — APERTURE · PHOTOS FROM UNSPLASH`, pad, H - 28);
+            const hasUnsplash = B.pins.some((x) => x.kind === "unsplash");
+            ctx.fillText(`${B.name.toUpperCase()} — APERTURE${hasUnsplash ? " · PHOTOS FROM UNSPLASH" : ""}`, pad, H - 28);
 
-            const blob = await new Promise((res) => cv.toBlob(res, "image/png"));
+            let blob;
+            try {
+                blob = await new Promise((res) => cv.toBlob(res, "image/png"));
+            } catch (err) {
+                throw new Error("an image from a link blocked the export");
+            }
             if (!blob) throw new Error("toBlob failed");
             download(blob, `aperture-${slug(B.name)}.png`);
-            announce("Image saved");
+            trackDownloads(B.pins.filter((x) => x.kind === "unsplash"));
+            toast("Image saved");
         } catch (err) {
-            console.warn("[aperture] image export failed:", err);
-            announce("Couldn't render the image");
+            window.reportProblem?.("image export failed", err);
+            toast(`Couldn't render the image${err?.message?.includes("link") ? ` — ${err.message}` : ""}`, "warn");
         } finally {
-            btn.disabled = false;
+            imageBtn.disabled = false;
         }
     });
+
+    /* ---------- housekeeping: drop uploaded images no board uses any more ---------- */
+    setTimeout(async () => {
+        if (!window.media?.available) return;
+        try {
+            const last = +localStorage.getItem(MEDIA_LAST) || 0;
+            if (Date.now() - last < 120000) return; // another tab may be mid-upload
+            const keep = new Set();
+            const collect = (pins) => (Array.isArray(pins) ? pins : []).forEach((x) => x?.kind === "upload" && keep.add(x.id));
+            index.list.forEach((b) => collect(store.get(bkey(b.id))?.pins));
+            if (!readonly) collect(B.pins);
+            [...undoStack, ...redoStack].forEach((sn) => {
+                try {
+                    collect(JSON.parse(sn).pins);
+                } catch (e) {}
+            });
+            const all = await window.media.keys();
+            for (const k of all) if (!keep.has(k)) await window.media.del(k);
+        } catch (e) {}
+    }, 20000);
 
     /* ---------- sync ---------- */
     // another tab changed boards

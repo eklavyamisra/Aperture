@@ -3,9 +3,16 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "dev": "node dev.mjs"
+        "dev": "node dev.mjs",
+        "test": "npm run test:unit && npm run test:e2e",
+        "test:unit": "node --test tests/api.test.js",
+        "test:e2e": "playwright test"
     },
     "engines": {
         "node": ">=20"
+    },
+    "devDependencies": {
+        "@axe-core/playwright": "^4.10.2",
+        "@playwright/test": "1.55.0"
     }
 }

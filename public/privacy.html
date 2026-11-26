@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy — Aperture</title>
+    <meta name="description" content="What Aperture stores, where it lives, and what is sent to other services.">
+    <meta name="theme-color" content="#0d0c0a">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="legal.css">
+</head>
+<body>
+    <main class="legal">
+        <a class="legal-back mono" href="/">← Aperture</a>
+        <p class="legal-kicker mono">Last updated 26 November 2026</p>
+        <h1>Privacy</h1>
+        <p class="legal-lede">Aperture has no accounts, no cookies, no analytics and no ads. Your boards live in your own browser. This page explains what that means in practice, and the few things that do leave your device.</p>
+
+        <h2>What stays in your browser</h2>
+        <ul>
+            <li><strong>Pin boards</strong> — the photos, notes, links, threads and groups on your boards, and where you last left the camera, are saved in your browser's local storage.</li>
+            <li><strong>Images you upload</strong> to a board are kept in your browser's IndexedDB storage. They are never sent to us.</li>
+            <li><strong>Small preferences</strong>, such as the grid density and whether the minimap is shown.</li>
+        </ul>
+        <p>None of this is sent to our servers. Clearing your browser's site data deletes it, so use <em>Export → Board file</em> to keep a copy. Anyone who uses the same browser profile can see these boards.</p>
+
+        <h2>What is sent elsewhere, and why</h2>
+        <ul>
+            <li><strong>Searches</strong> go to our server, which forwards them to the <a href="https://unsplash.com/privacy" target="_blank" rel="noopener">Unsplash API</a> and caches the results. We don't keep a record of what you searched for.</li>
+            <li><strong>Photos</strong> load directly from Unsplash's image servers, so Unsplash receives normal web requests from your browser. When you download a photo, or export a board image that contains Unsplash photos, we tell Unsplash which photos were downloaded, as their API guidelines require. This report doesn't include anything about you.</li>
+            <li><strong>Links and image addresses</strong> you add to a board load directly from the site they point to, which receives a normal web request from your browser.</li>
+            <li><strong>Fonts and scripts</strong> load from Google Fonts and the jsDelivr CDN.</li>
+            <li><strong>Error reports.</strong> If the app crashes, it sends us the error message, a short technical trace, the page path and whether you were in grid or canvas view. Search terms, board contents and anything that identifies you are left out. We use these reports only to fix bugs.</li>
+            <li><strong>Hosting.</strong> The site runs on Vercel, which handles every request and may keep standard server logs, such as IP address and time, under <a href="https://vercel.com/legal/privacy-policy" target="_blank" rel="noopener">its own policy</a>.</li>
+        </ul>
+
+        <h2>Share links</h2>
+        <p>When you share a board, the whole board is packed into the link itself, after the <code>#</code>. Browsers don't send that part of a link to servers, so we never see shared boards. Anyone you give the link to can open the board, so treat it like the board itself. Uploaded images are never included in share links.</p>
+
+        <h2>Children</h2>
+        <p>Aperture isn't directed at children under 13 and doesn't knowingly collect anything from them.</p>
+
+        <h2>Changes and contact</h2>
+        <p>If this changes, the date at the top changes too. Questions or requests: <a href="https://github.com/eklavyamisra/Aperture/issues" target="_blank" rel="noopener">open an issue</a>.</p>
+
+        <p class="legal-foot mono"><a href="/terms">Terms</a> · <a href="/">Back to Aperture</a></p>
+    </main>
+</body>
+</html>

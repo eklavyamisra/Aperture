@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { GET } from "./api/unsplash.js";
+import { POST as logPOST } from "./api/log.js";
 
 const root = new URL("./public/", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
 const PORT = +process.env.PORT || 5173;
@@ -34,6 +35,14 @@ const cache = new Map();
 
 createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${PORT}`);
+
+    if (url.pathname === "/api/log" && req.method === "POST") {
+        const chunks = [];
+        for await (const c of req) chunks.push(c);
+        const r = await logPOST(new Request(url, { method: "POST", body: Buffer.concat(chunks) }));
+        res.writeHead(r.status);
+        return res.end();
+    }
 
     if (url.pathname === "/api/unsplash") {
         const hit = cache.get(url.search);

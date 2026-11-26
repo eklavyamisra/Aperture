@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <script src="errors.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aperture — An Index of Light</title>
     <meta name="description" content="Aperture is an editorial search engine for photography, powered by the Unsplash community.">
@@ -277,36 +278,106 @@
                         <button type="button" id="pb-zoom-lvl" class="cv-zoom-lvl" aria-label="Reset zoom to 100%" data-cursor="Reset">100%</button>
                         <button type="button" id="pb-zoom-in" aria-label="Zoom in" data-cursor="In">+</button>
                     </div>
-                    <button type="button" id="pb-fit" data-cursor="Fit">Fit</button>
-                    <button type="button" id="pb-frame" class="pb-edit" data-cursor="Group">Group</button>
+                    <button type="button" id="pb-fit" data-cursor="Fit" aria-keyshortcuts="F">Fit</button>
+                    <button type="button" id="pb-add" class="pb-edit pb-add" data-cursor="Add" aria-haspopup="menu" aria-expanded="false" aria-controls="pb-add-menu">+ Add</button>
+                    <button type="button" id="pb-frame" class="pb-edit" data-cursor="Group" aria-keyshortcuts="G">Group</button>
                     <button type="button" id="pb-tidy" class="pb-edit" data-cursor="Tidy">Tidy</button>
                     <button type="button" id="pb-undo" class="pb-edit" data-cursor="Undo" aria-keyshortcuts="Control+Z" disabled>Undo</button>
+                    <button type="button" id="pb-find-btn" data-cursor="Find" aria-keyshortcuts="Control+F /" aria-controls="pb-find">Find</button>
+                    <button type="button" id="pb-palette-btn" data-cursor="Colours" aria-haspopup="dialog" aria-expanded="false" aria-controls="pb-palette">Palette</button>
                     <button type="button" id="pb-share" class="pb-edit" data-cursor="Share"><span>Share</span></button>
-                    <button type="button" id="pb-image" data-cursor="PNG">Image ↓</button>
-                    <button type="button" id="pb-export" class="pb-edit" data-cursor="Save">JSON ↓</button>
-                    <label class="pb-import pb-edit" data-cursor="Load">Import<input type="file" id="pb-import" accept="application/json,.json" class="sr-only"></label>
+                    <button type="button" id="pb-export-btn" data-cursor="Export" aria-haspopup="menu" aria-expanded="false" aria-controls="pb-export-menu">Export ▾</button>
                     <button type="button" class="pb-close" id="pb-close" data-cursor="Wall">Wall <span aria-hidden="true">✕</span></button>
                 </div>
                 <div class="pb-shared mono" id="pb-shared" hidden>
                     <span>Shared board · <b id="pb-shared-name"></b> · view only</span>
                     <button type="button" id="pb-keep" data-cursor="Keep">Save a copy to my boards</button>
                 </div>
-                <p class="pb-hint mono pb-edit">Drag empty space to pan · <kbd>Ctrl</kbd> + scroll or pinch to zoom · drag a <span class="pb-dot" aria-hidden="true"></span> pin onto another photo to tie a thread · click a thread to label or cut it · <kbd>Ctrl</kbd><kbd>Z</kbd> undo · keyboard: <kbd>Tab</kbd> to a photo, arrows move, <kbd>T</kbd> ties, <kbd>Del</kbd> unpins, <kbd>G</kbd> new group</p>
+                <p class="pb-hint mono pb-edit">Drop or paste images and links · drag a <span class="pb-dot" aria-hidden="true"></span> pin onto another card to tie a thread · <kbd>Shift</kbd> + drag to select · right-click for more · <kbd>N</kbd> note · <kbd>U</kbd> upload · <kbd>L</kbd> link · <kbd>W</kbd> wall · <kbd>G</kbd> group · <kbd>/</kbd> find · <kbd>M</kbd> map · <kbd>Ctrl</kbd><kbd>Z</kbd> undo · <kbd>?</kbd> tour</p>
             </header>
             <div class="pb-area" id="pb-area" tabindex="-1">
                 <div class="pb-world" id="pb-world">
                     <div class="pb-frames" id="pb-frames"></div>
-                    <svg class="pb-strings" id="pb-strings" aria-hidden="true"><path class="pb-thread-temp" id="pb-temp"/></svg>
+                    <svg class="pb-strings" id="pb-strings" aria-hidden="true"><path class="pb-thread-temp" id="pb-temp"/><path class="pb-guides" id="pb-guides"/></svg>
                     <div class="pb-knots" id="pb-knots"></div>
                 </div>
                 <div class="pb-pop" id="pb-pop" role="group" aria-label="Thread" hidden>
                     <input id="pb-pop-label" maxlength="60" placeholder="Label this thread…" aria-label="Thread label" spellcheck="false">
                     <button type="button" id="pb-pop-cut" class="mono" data-cursor="Cut">Cut ✕</button>
                 </div>
-                <p class="pb-empty" id="pb-empty">Nothing pinned yet.<br><span class="mono">Hover a frame and press <kbd>P</kbd> — or hit “Pin to board” in the viewer.</span></p>
+                <p class="pb-empty" id="pb-empty">Nothing here yet.<br><span class="mono">Drop images or links, press <kbd>N</kbd> for a note, <kbd>W</kbd> for photos from the wall — or hover a frame on the wall and press <kbd>P</kbd>.</span></p>
+                <div class="pb-marquee" id="pb-marquee" hidden></div>
+                <p class="pb-drop mono" id="pb-drop" hidden><span>Drop to add to the board</span></p>
+
+                <div class="pb-find" id="pb-find" role="search" hidden>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+                    <input id="pb-find-q" type="search" placeholder="Find on this board…" aria-label="Find on this board" autocomplete="off" spellcheck="false">
+                    <span class="mono" id="pb-find-n" aria-hidden="true"></span>
+                    <button type="button" id="pb-find-prev" aria-label="Previous match">↑</button>
+                    <button type="button" id="pb-find-next" aria-label="Next match">↓</button>
+                    <button type="button" id="pb-find-close" aria-label="Close find">✕</button>
+                </div>
+
+                <div class="pb-linkbox" id="pb-linkbox" role="dialog" aria-label="Add a link" hidden>
+                    <input id="pb-link-q" type="url" inputmode="url" placeholder="Paste a link or image address…" aria-label="Link or image address" autocomplete="off" spellcheck="false">
+                    <button type="button" id="pb-link-add" class="mono" data-cursor="Add">Add</button>
+                    <button type="button" id="pb-link-cancel" class="mono" aria-label="Cancel">✕</button>
+                </div>
+
+                <div class="pb-selbar mono" id="pb-selbar" role="toolbar" aria-label="Selected items" hidden>
+                    <span id="pb-sel-n">0 selected</span>
+                    <span class="pb-selbar-group">
+                        <button type="button" data-align="left" aria-label="Align left edges" title="Align left"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 1v14M5 4h8M5 10h5"/></svg></button>
+                        <button type="button" data-align="hcenter" aria-label="Align centres horizontally" title="Align centres"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v14M3 4h10M5 10h6"/></svg></button>
+                        <button type="button" data-align="right" aria-label="Align right edges" title="Align right"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M14 1v14M3 4h8M6 10h5"/></svg></button>
+                        <button type="button" data-align="top" aria-label="Align top edges" title="Align top"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 2h14M4 5v8M10 5v5"/></svg></button>
+                        <button type="button" data-align="vcenter" aria-label="Align middles vertically" title="Align middles"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 8h14M4 3v10M10 5v6"/></svg></button>
+                        <button type="button" data-align="bottom" aria-label="Align bottom edges" title="Align bottom"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 14h14M4 3v8M10 6v5"/></svg></button>
+                    </span>
+                    <span class="pb-selbar-group">
+                        <button type="button" data-dist="hdist" aria-label="Space evenly across" title="Space evenly across"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 2v12M15 2v12M6 5v6M10 5v6"/></svg></button>
+                        <button type="button" data-dist="vdist" aria-label="Space evenly down" title="Space evenly down"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 1h12M2 15h12M5 6h6M5 10h6"/></svg></button>
+                    </span>
+                    <button type="button" id="pb-sel-group" class="pb-selbar-text">Group</button>
+                    <button type="button" id="pb-sel-delete" class="pb-selbar-text is-danger">Remove</button>
+                    <button type="button" id="pb-sel-clear" aria-label="Clear selection" title="Clear selection (Esc)">✕</button>
+                </div>
+
+                <canvas class="pb-minimap" id="pb-minimap" width="200" height="128" aria-hidden="true" title="Board overview — click to move there (M to hide)" hidden></canvas>
+
+                <div class="pb-tray" id="pb-tray" role="region" aria-label="Photos from the wall" hidden>
+                    <div class="pb-tray-head mono">
+                        <span>From the wall</span>
+                        <span class="pb-tray-hint">Drag onto the board, or click to add</span>
+                        <button type="button" id="pb-tray-close" aria-label="Close photos from the wall">✕</button>
+                    </div>
+                    <ul class="pb-tray-list" id="pb-tray-list"></ul>
+                </div>
+                <input type="file" id="pb-file" accept="image/*" multiple class="sr-only" tabindex="-1" aria-hidden="true">
             </div>
             <p class="sr-only" id="pb-live" aria-live="polite"></p>
+
+            <!-- board menus and popovers (positioned by pins.js) -->
+            <div class="pb-menu mono" id="pb-add-menu" role="menu" aria-label="Add to the board" hidden>
+                <button type="button" role="menuitem" data-add="image">Images from your device <kbd>U</kbd></button>
+                <button type="button" role="menuitem" data-add="note">Note <kbd>N</kbd></button>
+                <button type="button" role="menuitem" data-add="link">Link or image address <kbd>L</kbd></button>
+                <button type="button" role="menuitem" data-add="wall">Photos from the wall <kbd>W</kbd></button>
+            </div>
+            <div class="pb-menu mono" id="pb-export-menu" role="menu" aria-label="Export" hidden>
+                <button type="button" role="menuitem" id="pb-image">Image (PNG)</button>
+                <button type="button" role="menuitem" id="pb-export" class="pb-edit">Board file (JSON)</button>
+                <label role="menuitem" class="pb-edit" tabindex="-1">Import a board file…<input type="file" id="pb-import" accept="application/json,.json" class="sr-only" tabindex="-1"></label>
+            </div>
+            <div class="pb-menu mono" id="pb-ctx" role="menu" aria-label="Actions" hidden></div>
+            <div class="pb-palette" id="pb-palette" role="dialog" aria-label="Board palette" hidden>
+                <p class="pb-palette-head mono"><span>Palette</span><button type="button" id="pb-palette-copy">Copy as CSS</button></p>
+                <ul class="pb-swatches" id="pb-swatches"></ul>
+            </div>
+        </section>
     </div>
+
+    <p class="toast mono" id="toast" role="status" aria-live="polite"></p>
 
     <!-- ============ LIGHTBOX ============ -->
     <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-labelledby="lb-title" data-lenis-prevent hidden>
@@ -357,6 +428,8 @@
             <ul class="footer-links mono">
                 <li><a href="https://unsplash.com/?utm_source=aperture&utm_medium=referral" target="_blank" rel="noopener">Unsplash ↗</a></li>
                 <li><a href="https://unsplash.com/license?utm_source=aperture&utm_medium=referral" target="_blank" rel="noopener">License ↗</a></li>
+                <li><a href="/privacy">Privacy</a></li>
+                <li><a href="/terms">Terms</a></li>
                 <li><button class="linklike" id="footer-top">Back to top ↑</button></li>
             </ul>
         </div>
@@ -372,7 +445,9 @@
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/Flip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lenis@1.1.18/dist/lenis.min.js"></script>
     <script src="api.js"></script>
+    <script src="media.js"></script>
     <script src="pins.js"></script>
+    <script src="tour.js"></script>
     <script src="canvas.js"></script>
 </body>
 </html>

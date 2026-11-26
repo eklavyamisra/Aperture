@@ -63,3 +63,38 @@ migrated into "My board" on first load.
 - **Export:** *Image ↓* renders a PNG; *JSON ↓* / *Import* move boards between browsers (imports merge).
 
 While the board is open the WebGL wall stops redrawing and is blurred once with CSS, so the board stays at 60 fps.
+
+**What a board can hold:** Unsplash photos, your own images (*+ Add*, drop, or paste; stored in IndexedDB by
+`media.js`, downscaled to 2000 px, never uploaded), links and image addresses (`L`, drop or paste; an address that
+loads as an image becomes a picture card, anything else a bookmark), and notes (`N`, or paste plain text).
+
+- **From the wall:** `W` opens a tray of the current wall's photos — drag onto the board or click to add.
+- **Select:** click, Shift+click, Shift+drag a box, or Ctrl/⌘+A. The bar at the bottom aligns, spaces, groups or removes.
+- **Snapping:** dragged cards snap to other cards' edges and centres (hold Alt to place freely).
+- **Find / minimap / palette:** `/` or Ctrl/⌘+F searches notes, names, links, labels and group titles; `M` toggles the
+  minimap; *Palette* pulls the board's dominant colours (click to copy, or copy all as CSS).
+- **Right-click** (long-press on touch) a card or empty space for its actions.
+- Share links leave out uploaded images (they can't fit in a URL); *Export → Board file* includes them.
+- Exporting a board image reports each Unsplash photo in it to Unsplash's download endpoint, as the API guidelines ask.
+
+## Errors, storage, legal
+
+- `errors.js` sends uncaught errors to `api/log.js`, which writes them to the Vercel function logs
+  (Project → Logs, search `[client-error]`). Reports carry the message, a trimmed stack, the page path and grid/canvas —
+  no query string, board contents or visitor details.
+- The board warns before browser storage fills up, and says so if a save fails.
+- `/privacy` and `/terms` are plain pages (`privacy.html`, `terms.html`, `legal.css`), linked from the footer.
+
+## Tests
+
+```
+npm install
+npx playwright install chromium
+npm test              # unit tests (api/) + browser tests (tests/*.spec.js)
+```
+
+Unsplash is mocked in `tests/mock.js`, so tests need no API key and never touch the rate limit.
+GitHub Actions runs them on every push to `main` and on pull requests (`.github/workflows/test.yml`).
+`tests/a11y.spec.js` runs axe-core and fails on serious or critical accessibility problems.
+
+First-time board visitors get a five-step walkthrough (`tour.js`); `?` on the board replays it.
