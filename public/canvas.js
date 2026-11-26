@@ -60,9 +60,12 @@
     uniform vec2 uHover;
     uniform float uHoverAmt;
     uniform float uFade;
+    uniform vec4 uPins[${MAX / 4}];
+    uniform vec3 uFlash;
     out vec4 outColor;
 
     const vec3 BG = vec3(0.051, 0.047, 0.039);
+    const vec3 ACC = vec3(1.0, 0.357, 0.18);
 
     void main() {
         vec2 viewPx = uRes / uDpr;
@@ -109,6 +112,28 @@
             vec3 photo = mix(slot.rgb, tex, slot.a);
             photo *= mix(1.0, 0.42, uHoverAmt * (1.0 - isH));
             color = mix(BG, photo, mask);
+
+            // pinned: accent inner ring + a pin head in the top-right corner
+            int ii = int(idx);
+            float pinA = uPins[ii / 4][ii % 4];
+            if (pinA > 0.001) {
+                float ring = smoothstep(-3.0 - aa, -3.0 + aa, d) * mask;
+                color = mix(color, ACC, ring * pinA);
+                vec2 pc = vec2(uCell.x - 17.0, 17.0);
+                float pd = length(local - pc);
+                float pr = 6.0 * pinA;
+                color = mix(color, BG, (1.0 - smoothstep(pr + 1.5, pr + 3.0 + aa, pd)) * pinA * 0.85);
+                color = mix(color, ACC, 1.0 - smoothstep(pr - aa, pr + aa, pd));
+                color = mix(color, vec3(1.0), (1.0 - smoothstep(1.6 * pinA - aa, 1.6 * pinA + aa, length(local - pc + vec2(1.8, 1.8)))) * 0.8);
+            }
+
+            // located from the board: a pulsing thick accent frame
+            float isF = step(abs(col - uFlash.x) + abs(row - uFlash.y), 0.5);
+            if (isF > 0.0 && uFlash.z > 0.001) {
+                float w = 4.0 + 10.0 * uFlash.z;
+                float fr = smoothstep(-w - aa, -w + aa, d) * mask;
+                color = mix(color, ACC, fr * uFlash.z);
+            }
         }
 
         // lens vignette
@@ -146,7 +171,7 @@
     gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
     const U = {};
-    ["uRes", "uDpr", "uCam", "uZoom", "uCell", "uPitch", "uK", "uVel", "uCA", "uAtlas", "uGrid", "uCount", "uSlots", "uHover", "uHoverAmt", "uFade"].forEach(
+    ["uRes", "uDpr", "uCam", "uZoom", "uCell", "uPitch", "uK", "uVel", "uCA", "uAtlas", "uGrid", "uCount", "uSlots", "uHover", "uHoverAmt", "uFade", "uPins", "uFlash"].forEach(
         (n) => (U[n] = gl.getUniformLocation(prog, n))
     );
 
@@ -168,6 +193,7 @@
     const sctx = scratch.getContext("2d");
 
     const slotData = new Float32Array(MAX * 4);
+    const pinData = new Float32Array(MAX); // eased 0..1 "is pinned" per slot
     const slots = []; // { photo, a }
     let gen = 0;
     let mipDirty = false;
@@ -212,6 +238,7 @@
         slots.forEach((s) => gsap.killTweensOf(s));
         slots.length = 0;
         slotData.fill(0);
+        pinData.fill(0);
     }
 
     function syncSlots() {
@@ -238,22 +265,105 @@
     const BASE_K = reduceMotion ? 0 : 0.1;
     let K = BASE_K;
     let zoom = 1;
+    // user zoom: eased toward its target, applied on top of the intro/speed zoom
+    const ZMIN = 0.35;
+    const ZMAX = 2.5;
+    const uz = { v: 1, t: 1 };
     let hoverCell = null;
     let pointer = null; // last pointer position over the canvas
     let drag = null;
+    let paused = false; // pin board is over the wall
+    const flash = { col: 1e5, row: 1e5, amt: 0 };
 
     const cv = (window.canvasView = {
         isOpen: false,
         token: -1,
         fetching: false,
         rectFor,
+        locate,
+        onWall: (id) => slots.some((s) => s.photo.id === id),
+        // the pin board covers the wall: blur it once with a CSS filter and stop
+        // redrawing as soon as the camera has settled (see the end of frame())
+        setPaused(on) {
+            paused = on;
+            view.classList.toggle("is-board", on);
+            if (on) pointer = null;
+            else if (cv.isOpen && !raf) {
+                lastT = 0;
+                raf = requestAnimationFrame(frame);
+            }
+        },
     });
+
+    // fly the camera to the nearest tile showing this photo and flash it
+    function locate(id) {
+        const k = slots.findIndex((s) => s.photo.id === id);
+        if (k < 0) return false;
+        const c0 = Math.round(cam.tx / PX);
+        let best = null;
+        let bestD = Infinity;
+        for (let col = c0 - 12; col <= c0 + 12; col++) {
+            const sh = colShift(col);
+            const r0 = Math.round((cam.ty + sh) / PY);
+            for (let row = r0 - 12; row <= r0 + 12; row++) {
+                if (photoAt(col, row) !== k) continue;
+                const wx = col * PX + CW / 2;
+                const wy = row * PY - sh + CH / 2;
+                const d = Math.hypot(wx - cam.tx, wy - cam.ty);
+                // skip the tile we're already on so "locate" always travels a bit
+                if (d < bestD && d > PX * 2) {
+                    bestD = d;
+                    best = { col, row, wx, wy };
+                }
+            }
+        }
+        if (!best) return false;
+        mom.x = mom.y = 0;
+        cam.tx = best.wx;
+        cam.ty = best.wy;
+        flash.col = best.col;
+        flash.row = best.row;
+        gsap.killTweensOf(flash);
+        if (reduceMotion) flash.amt = 1;
+        gsap.fromTo(flash, { amt: 0 }, { amt: 1, duration: 0.5, delay: reduceMotion ? 0 : 0.6, ease: "back.out(3)" });
+        gsap.to(flash, { amt: 0, duration: 1.4, delay: 3.2, ease: "power2.inOut" });
+        return true;
+    }
 
     function resetCamera() {
         cam.x = cam.tx = CW / 2;
         cam.y = cam.ty = CH / 2;
         mom.x = mom.y = 0;
+        uz.v = uz.t = 1;
+        syncZoomUI();
     }
+
+    // zoom to `next`, keeping the world point under screen (x, y) in place
+    function setZoom(next, x = innerWidth / 2, y = innerHeight / 2) {
+        next = gsap.utils.clamp(ZMIN, ZMAX, next);
+        if (Math.abs(next - uz.t) < 1e-4) return;
+        const cx = x - innerWidth / 2;
+        const cy = y - innerHeight / 2;
+        cam.tx += cx * (1 / uz.t - 1 / next);
+        cam.ty += cy * (1 / uz.t - 1 / next);
+        uz.t = next;
+        if (reduceMotion) uz.v = next;
+        syncZoomUI();
+    }
+    const zoomBy = (f, x, y) => setZoom(uz.t * f, x, y);
+
+    const zoomOutBtn = q("#cv-zoom-out");
+    const zoomInBtn = q("#cv-zoom-in");
+    const zoomLvl = q("#cv-zoom-lvl");
+    function syncZoomUI() {
+        if (!zoomLvl) return;
+        zoomLvl.textContent = `${Math.round(uz.t * 100)}%`;
+        zoomOutBtn.disabled = uz.t <= ZMIN + 1e-4;
+        zoomInBtn.disabled = uz.t >= ZMAX - 1e-4;
+    }
+    zoomOutBtn?.addEventListener("click", () => zoomBy(1 / 1.25));
+    zoomInBtn?.addEventListener("click", () => zoomBy(1.25));
+    zoomLvl?.addEventListener("click", () => setZoom(1));
 
     const mod = (a, n) => ((a % n) + n) % n;
     const colShift = (col) => mod(col * 0.618034, 1) * PY;
@@ -323,7 +433,29 @@
     }
 
     /* ---------- input ---------- */
+    // two fingers on a touch screen pinch-zoom around their midpoint
+    const touches = new Map();
+    let pinch = null;
+    const pinchGeom = () => {
+        const [a, b] = [...touches.values()];
+        return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    };
+
     glc.addEventListener("pointerdown", (e) => {
+        if (e.pointerType === "touch") {
+            touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            if (touches.size >= 2) {
+                glc.setPointerCapture(e.pointerId);
+                if (touches.size === 2) {
+                    drag = null;
+                    mom.x = mom.y = 0;
+                    view.classList.remove("is-dragging");
+                    const g = pinchGeom();
+                    pinch = { d0: Math.max(1, g.d), z0: uz.t, x: g.x, y: g.y };
+                }
+                return;
+            }
+        }
         if (e.button !== 0) return;
         glc.setPointerCapture(e.pointerId);
         drag = { id: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now(), moved: 0, vx: 0, vy: 0 };
@@ -333,6 +465,16 @@
 
     glc.addEventListener("pointermove", (e) => {
         pointer = { x: e.clientX, y: e.clientY };
+        if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pinch && touches.size >= 2) {
+            const g = pinchGeom();
+            setZoom((pinch.z0 * g.d) / pinch.d0, g.x, g.y);
+            cam.tx -= (g.x - pinch.x) / uz.t;
+            cam.ty -= (g.y - pinch.y) / uz.t;
+            pinch.x = g.x;
+            pinch.y = g.y;
+            return;
+        }
         if (!drag || e.pointerId !== drag.id) return;
         const dx = e.clientX - drag.x;
         const dy = e.clientY - drag.y;
@@ -349,6 +491,8 @@
     });
 
     function endDrag(e) {
+        touches.delete(e.pointerId);
+        if (touches.size < 2) pinch = null;
         if (!drag || e.pointerId !== drag.id) return;
         const wasClick = drag.moved < 6;
         if (!wasClick && performance.now() - drag.t < 80) {
@@ -374,6 +518,12 @@
         "wheel",
         (e) => {
             e.preventDefault();
+            // ctrl/cmd + wheel (and trackpad pinch, which arrives as ctrl+wheel) zooms
+            if (e.ctrlKey || e.metaKey) {
+                const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+                zoomBy(Math.exp(-gsap.utils.clamp(-100, 100, d) * 0.0025), e.clientX, e.clientY);
+                return;
+            }
             const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
             let dx = e.deltaX * unit;
             let dy = e.deltaY * unit;
@@ -390,7 +540,19 @@
             if (e.key === "Escape") document.activeElement.blur();
             return;
         }
-        const step = PX * 0.9;
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        const key = e.key.toLowerCase();
+        if (key === "b") return window.pins?.isBoardOpen() ? window.pins.closeBoard() : window.pins?.openBoard();
+        if (window.pins?.isBoardOpen()) return;
+        if (key === "p") {
+            const hit = hoverCell || (pointer && pick(pointer.x, pointer.y));
+            if (hit && slots[hit.idx]) window.pins?.toggle(slots[hit.idx].photo, { from: cellRect(hit.col, hit.row) });
+            return;
+        }
+        if (e.key === "+" || e.key === "=") return zoomBy(1.25);
+        if (e.key === "-" || e.key === "_") return zoomBy(1 / 1.25);
+        if (e.key === "0") return setZoom(1);
+        const step = PX * 0.9 / uz.t;
         if (e.key === "Escape") close();
         else if (e.key === "ArrowRight") cam.tx += step;
         else if (e.key === "ArrowLeft") cam.tx -= step;
@@ -404,9 +566,30 @@
     let raf = 0;
     let lastCap = null;
 
+    // adaptive resolution: if frames run long for a while, render fewer pixels;
+    // creep back up once there is headroom again
+    let resScale = 1;
+    let frameEma = 16;
+    let lastT = 0;
+    let lastAdjust = 0;
+    function adaptResolution(t) {
+        const dt = lastT ? t - lastT : 0;
+        lastT = t;
+        if (dt <= 0 || dt > 250) return;
+        frameEma += (dt - frameEma) * 0.06;
+        if (t - lastAdjust < 800) return;
+        let next = resScale;
+        if (frameEma > 22 && resScale > 0.55) next = Math.max(0.55, resScale - 0.15);
+        else if (frameEma < 15 && resScale < 1) next = Math.min(1, resScale + 0.1);
+        if (next === resScale) return;
+        resScale = next;
+        lastAdjust = t;
+        resize();
+    }
+
     function resize() {
         measure();
-        const dpr = Math.min(devicePixelRatio || 1, 2);
+        const dpr = Math.min(devicePixelRatio || 1, 2) * resScale;
         glc.width = Math.round(innerWidth * dpr);
         glc.height = Math.round(innerHeight * dpr);
         gl.viewport(0, 0, glc.width, glc.height);
@@ -421,8 +604,9 @@
         } else cursorReset();
     }
 
-    function frame() {
+    function frame(t = performance.now()) {
         raf = requestAnimationFrame(frame);
+        if (!paused) adaptResolution(t);
         syncSlots();
 
         // momentum, then ease the camera toward its target
@@ -435,6 +619,7 @@
         cam.px = cam.x;
         cam.py = cam.y;
         const ease = reduceMotion ? 1 : 0.11;
+        uz.v += (uz.t - uz.v) * ease;
         cam.x += (cam.tx - cam.x) * ease;
         cam.y += (cam.ty - cam.y) * ease;
         cam.vx = cam.x - cam.px;
@@ -444,10 +629,11 @@
         fx.speed += (gsap.utils.clamp(0, 1, v / 38) - fx.speed) * 0.12;
         const intro = fx.intro;
         K = BASE_K + (reduceMotion ? 0 : fx.speed * 0.32 + (1 - intro) * 0.9);
-        zoom = reduceMotion ? 1 : gsap.utils.interpolate(0.42, 1, intro) * (1 - fx.speed * 0.08);
+        zoom = reduceMotion ? 1 : gsap.utils.interpolate(0.42, 1, intro) * (1 - fx.speed * 0.08) * uz.v;
+        if (reduceMotion) zoom = uz.v;
 
         // hover
-        const hit = pointer && !drag && lightbox.hidden ? pick(pointer.x, pointer.y) : null;
+        const hit = pointer && !drag && !paused && lightbox.hidden ? pick(pointer.x, pointer.y) : null;
         const key = hit ? `${hit.col},${hit.row}` : null;
         if (key !== (hoverCell && hoverCell.key)) {
             hoverCell = hit ? { ...hit, key } : null;
@@ -457,12 +643,20 @@
         fx.hover += ((hoverCell && fx.speed < 0.2 ? 1 : 0) - fx.hover) * 0.12;
 
         const capIdx = hoverCell ? hoverCell.idx : null;
-        if (capIdx !== lastCap) {
-            lastCap = capIdx;
-            const p = capIdx != null ? slots[capIdx]?.photo : null;
+        const capP = capIdx != null ? slots[capIdx]?.photo : null;
+        const capPinned = !!capP && !!window.pins?.has(capP.id);
+        const capKey = capIdx == null ? null : `${capIdx}:${capPinned}`;
+        if (capKey !== lastCap) {
+            lastCap = capKey;
+            const p = capP;
             capEl.innerHTML = p
-                ? `<b>N° ${pad(state.photos.indexOf(p) + 1)}</b> ${esc(p.user?.name || "Unknown")} <i style="--c:${esc(p.color || "#222")}"></i>${esc((p.color || "").toUpperCase())}`
+                ? `<b>N° ${pad(state.photos.indexOf(p) + 1)}</b> ${esc(p.user?.name || "Unknown")} <i style="--c:${esc(p.color || "#222")}"></i>${esc((p.color || "").toUpperCase())}${capPinned ? ' <em class="cv-pinned">✦ Pinned</em>' : ""}`
                 : "&nbsp;";
+        }
+
+        for (let k = 0; k < slots.length; k++) {
+            const target = window.pins?.has(slots[k].photo.id) ? 1 : 0;
+            pinData[k] += (target - pinData[k]) * (reduceMotion ? 1 : 0.18);
         }
         const coord = (n) => (n < 0 ? "−" : "") + pad(Math.abs(Math.round(n / 10)), 4);
         xyEl.textContent = `X ${coord(cam.x)} · Y ${coord(cam.y)}`;
@@ -494,15 +688,24 @@
         gl.uniform2f(U.uHover, hoverCell ? hoverCell.col : 1e5, hoverCell ? hoverCell.row : 1e5);
         gl.uniform1f(U.uHoverAmt, fx.hover);
         gl.uniform1f(U.uFade, Math.min(1, intro * 2.2));
+        gl.uniform4fv(U.uPins, pinData);
+        gl.uniform3f(U.uFlash, flash.col, flash.row, flash.amt);
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+        // under the board nothing moves: stop once the last motion has died out
+        const still = Math.abs(cam.tx - cam.x) < 0.05 && Math.abs(cam.ty - cam.y) < 0.05 && Math.hypot(mom.x, mom.y) < 0.01;
+        if (paused && still && fx.intro > 0.999 && fx.speed < 0.002 && fx.hover < 0.002 && Math.abs(uz.t - uz.v) < 1e-4 && !gsap.isTweening(flash)) {
+            cancelAnimationFrame(raf);
+            raf = 0;
+        }
     }
 
     /* ---------- title card ---------- */
     const titleEl = q("#cv-title");
     function showTitle() {
-        const text = state.mode === "search" ? `“${esc(state.query)}”` : "Editorial";
+        const text = state.mode === "search" ? `“${esc(state.query)}”` : state.mode === "user" && state.user ? `by ${esc(state.user.name)}` : "Editorial";
         titleEl.innerHTML = `<span>${text}</span>`;
         if (reduceMotion) return;
         const span = titleEl.firstChild;
@@ -549,6 +752,7 @@
 
     function close() {
         if (!cv.isOpen) return;
+        if (window.pins?.isBoardOpen()) return window.pins.closeBoard(close);
         const done = () => {
             cv.isOpen = false;
             view.hidden = true;
@@ -566,6 +770,7 @@
         gsap.to(fx, { intro: 0, duration: 0.8, ease: "expo.in", onComplete: done });
     }
 
+    cv.open = open;
     openers.forEach((b) => b.addEventListener("click", open));
     q("#cv-close").addEventListener("click", close);
 

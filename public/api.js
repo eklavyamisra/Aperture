@@ -35,10 +35,12 @@ const lbStage = q("#lb-stage");
    State
 ---------------------------------------------------------- */
 const state = {
-    mode: "feed", // "feed" | "search"
+    mode: "feed", // "feed" | "search" | "user"
     query: "",
+    user: null, // { username, name } in "user" mode
     order: "relevant",
     color: "",
+    orientation: "",
     page: 1,
     totalPages: Infinity,
     total: 0,
@@ -260,12 +262,17 @@ async function fetchPage() {
         const data = await api("/photos", { page: state.page, per_page: PER_PAGE });
         return { results: data, total: null, totalPages: Infinity };
     }
+    if (state.mode === "user") {
+        const data = await api(`/users/${state.user.username}/photos`, { page: state.page, per_page: PER_PAGE });
+        return { results: Array.isArray(data) ? data : [], total: null, totalPages: Infinity };
+    }
     const data = await api("/search/photos", {
         query: state.query,
         page: state.page,
         per_page: PER_PAGE,
         order_by: state.order,
         color: state.color,
+        orientation: state.orientation,
     });
     return { results: data.results, total: data.total, totalPages: data.total_pages };
 }
@@ -286,6 +293,8 @@ async function loadPage() {
         }
         state.page++;
         if (state.mode === "feed" && results.length === 0) state.page = 11;
+        // the user endpoint has no total in the body: a short page means we're done
+        if (state.mode === "user" && results.length < PER_PAGE) state.totalPages = state.page - 1;
 
         const fresh = results.filter((p) => !state.ids.has(p.id));
         fresh.forEach((p, k) => {
@@ -319,7 +328,11 @@ async function loadPage() {
 function updateCounts() {
     q("#hud-count").textContent = pad(state.photos.length);
     q("#results-total").textContent =
-        state.mode === "search" ? `${fmt(state.total)} frames found` : "Curated by Unsplash editors";
+        state.mode === "search"
+            ? `${fmt(state.total)} frames found`
+            : state.mode === "user"
+              ? `Work by ${state.user.name}`
+              : "Curated by Unsplash editors";
 }
 
 function updateMore() {
@@ -333,7 +346,7 @@ function renderEmpty() {
     gridState.hidden = false;
     gridState.innerHTML = `
         <h3>Nothing developed.</h3>
-        <p>No photographs matched “${esc(state.query)}”${state.color ? " in that tone" : ""}. Try something broader.</p>
+        <p>${state.mode === "user" ? `No public photographs from ${esc(state.user.name)}.` : `No photographs matched “${esc(state.query)}”${state.color || state.orientation ? " with those filters" : ""}. Try something broader.`}</p>
         <div class="chips">
             <button class="chip" data-q="Light">Light</button>
             <button class="chip" data-q="Mountains">Mountains</button>
@@ -407,17 +420,21 @@ async function runSearch(query, { scroll = true } = {}) {
     const changed = query.toLowerCase() !== state.query.toLowerCase() || state.mode !== "search";
     state.mode = "search";
     state.query = query;
+    state.user = null;
     if (changed) {
         state.order = "relevant";
         state.color = "";
+        state.orientation = "";
         syncFilters();
     }
+    syncModeUI();
 
     qa(".js-search input").forEach((i) => (i.value = query));
     qa(".js-search input").forEach((i) => i.blur());
     try {
         const url = new URL(location.href);
         url.searchParams.set("q", query);
+        url.searchParams.delete("by");
         history.replaceState(null, "", url);
     } catch (e) {}
 
@@ -428,6 +445,42 @@ async function runSearch(query, { scroll = true } = {}) {
 
     if (scroll) scrollToTarget(resultsEl, { offset: -40 });
     await refresh();
+}
+
+// show everything one photographer has published
+async function runUser(username, name, { scroll = true } = {}) {
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(username || "")) return;
+    name = name || username;
+    state.mode = "user";
+    state.user = { username, name };
+    state.query = "";
+    state.order = "relevant";
+    state.color = "";
+    state.orientation = "";
+    syncFilters();
+    syncModeUI();
+
+    qa(".js-search input").forEach((i) => (i.value = ""));
+    try {
+        const url = new URL(location.href);
+        url.searchParams.set("by", username);
+        url.searchParams.delete("q");
+        history.replaceState(null, "", url);
+    } catch (e) {}
+
+    document.title = `${name} — Aperture`;
+    q("#hud-mode").textContent = `@${username.toUpperCase()}`;
+    filtersEl.hidden = true;
+    setTitle(`<em>by</em> ${esc(name)}`, "(Photographer)");
+
+    if (scroll) scrollToTarget(resultsEl, { offset: -40 });
+    await refresh();
+}
+
+// colour / orientation only exist for searches; the canvas tone row follows that
+function syncModeUI() {
+    const tones = q("#cv-tones");
+    if (tones) tones.hidden = state.mode !== "search";
 }
 
 async function refresh() {
@@ -466,7 +519,21 @@ function syncFilters() {
         b.classList.toggle("is-active", on);
         b.setAttribute("aria-checked", on);
     });
+    qa("[data-orient]").forEach((b) => {
+        const on = b.dataset.orient === state.orientation;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-checked", on);
+    });
 }
+
+qa("[data-orient]").forEach((b) =>
+    b.addEventListener("click", () => {
+        if (state.orientation === b.dataset.orient) return;
+        state.orientation = b.dataset.orient;
+        syncFilters();
+        refresh();
+    })
+);
 
 qa("[data-order]").forEach((b) =>
     b.addEventListener("click", () => {
@@ -575,8 +642,16 @@ function fillPanel(p) {
     q("#lb-download").href = `${p.links.download}?force=true&${UTM}`;
     q("#lb-download").dataset.track = p.links.download_location;
     q("#lb-open").href = utm(p.links.html);
+    const sim = similarQuery(p);
+    const simBtn = q("#lb-similar");
+    simBtn.disabled = !sim;
+    simBtn.title = sim ? `Search “${sim}”` : "No description to search with";
+    const byBtn = q("#lb-by");
+    q("#lb-by-name").textContent = user.name || "photographer";
+    byBtn.disabled = !user.username || (state.mode === "user" && state.user?.username === user.username);
     q("#lb-prev").hidden = lb.i === 0;
     q("#lb-next").hidden = lb.i >= state.photos.length - 1 && !hasMore();
+    window.pins?.syncLightbox(); // pins.js
 }
 
 function upgradeImage(p, rect) {
@@ -732,6 +807,43 @@ async function go(dir) {
         .to(lbImg, { x: to.x, opacity: 1, duration: 0.8, ease: "expo.out" })
         .fromTo(".lb-body > *", { y: 20, opacity: 0 }, { y: 0, opacity: 1, duration: 0.7, stagger: 0.04, ease: "expo.out" }, "<");
 }
+
+/* "more like this": a search built from the photo's tags / description */
+const STOP = new Set(
+    "a an the of in on at and or with for to from by is are was its it this that these those over under into onto near some two three one few many very top front back side view photo image picture shot person people man woman their his her".split(
+        " "
+    )
+);
+function similarQuery(p) {
+    const tags = (Array.isArray(p.tags) ? p.tags : []).map((t) => t?.title).filter((t) => typeof t === "string" && t.length > 2);
+    if (tags.length) return tags.slice(0, 3).join(" ");
+    const words = String(p.alt_description || p.description || "")
+        .toLowerCase()
+        .replace(/[^a-z\s-]/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 2 && !STOP.has(w));
+    return [...new Set(words)].slice(0, 3).join(" ");
+}
+
+// close the viewer, then run the next search once it's out of the way
+async function afterLightbox(fn) {
+    for (let i = 0; i < 80 && !lightbox.hidden; i++) {
+        if (!lb.busy) closeLightbox();
+        await new Promise((r) => setTimeout(r, 50));
+    }
+    fn();
+}
+
+q("#lb-similar").addEventListener("click", () => {
+    const p = state.photos[lb.i];
+    const query = p && similarQuery(p);
+    if (query) afterLightbox(() => runSearch(query, { scroll: !inCanvas() }));
+});
+
+q("#lb-by").addEventListener("click", () => {
+    const u = state.photos[lb.i]?.user;
+    if (u?.username) afterLightbox(() => runUser(u.username, u.name, { scroll: !inCanvas() }));
+});
 
 q("#lb-close").addEventListener("click", closeLightbox);
 q("#lb-prev").addEventListener("click", () => go(-1));
@@ -972,6 +1084,15 @@ async function boot() {
 
     const params = new URLSearchParams(location.search);
     const initial = (params.get("q") || "").trim();
+    const by = (params.get("by") || "").trim();
+    if (!initial && /^[A-Za-z0-9_-]{1,40}$/.test(by)) {
+        state.mode = "user";
+        state.user = { username: by, name: by };
+        document.title = `${by} — Aperture`;
+        q("#hud-mode").textContent = `@${by.toUpperCase()}`;
+        titleEl.querySelector("span").innerHTML = `<em>by</em> @${esc(by)}`;
+        q("#results-kicker").textContent = "(Photographer)";
+    }
     if (initial) {
         state.mode = "search";
         state.query = initial;
@@ -982,6 +1103,7 @@ async function boot() {
         titleEl.querySelector("span").innerHTML = `<em>“</em>${esc(initial)}<em>”</em>`;
         q("#results-kicker").textContent = "(Search results)";
     }
+    syncModeUI();
 
     status.textContent = "FETCHING FRAMES";
     try {
@@ -997,7 +1119,7 @@ async function boot() {
     crawl.kill();
     const start = () => {
         intro();
-        if (initial) setTimeout(() => scrollToTarget(resultsEl, { offset: -40 }), reduceMotion ? 0 : 1400);
+        if (initial || state.mode === "user") setTimeout(() => scrollToTarget(resultsEl, { offset: -40 }), reduceMotion ? 0 : 1400);
     };
     if (reduceMotion) {
         prog.v = 100;

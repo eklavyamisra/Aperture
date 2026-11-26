@@ -5,6 +5,7 @@
 //   GET /api/unsplash?path=/search/photos&query=tokyo&page=1
 //   GET /api/unsplash?path=/photos&page=2
 //   GET /api/unsplash?path=/photos/<id>/download   (download tracking)
+//   GET /api/unsplash?path=/users/<username>/photos&page=1
 
 const API = "https://api.unsplash.com";
 
@@ -13,6 +14,7 @@ const ROUTES = [
     { re: /^\/photos$/, params: ["page", "per_page", "order_by"], ttl: 3600 },
     { re: /^\/search\/photos$/, params: ["query", "page", "per_page", "order_by", "color", "orientation"], ttl: 3600 },
     { re: /^\/photos\/[A-Za-z0-9_-]{1,40}\/download$/, params: ["ixid"], ttl: 0 },
+    { re: /^\/users\/[A-Za-z0-9_-]{1,40}\/photos$/, params: ["page", "per_page", "order_by"], ttl: 3600 },
 ];
 
 const json = (status, body, headers = {}) =>
