@@ -17,6 +17,7 @@ flowchart LR
         MEDIA[media.js<br/>image storage]
         TOUR[tour.js<br/>walkthrough]
         CLOUD[cloud.js<br/>sign-in + sync]
+        SHARE[share.js<br/>share panel]
         LS[(localStorage<br/>boards, views)]
         IDB[(IndexedDB<br/>uploaded images)]
     end
@@ -49,7 +50,9 @@ flowchart LR
     CLOUD --> AUTH
     CLOUD <-->|row-level security| DB
     CLOUD <-->|own folder only| BUCKET
-    BOARD -->|shared_board code| DB
+    BOARD -->|shared_board code, password| DB
+    SHARE --> CLOUD
+    SHARE -->|POST /api/board password| BOARD
 ```
 
 ## Repository layout
@@ -68,6 +71,7 @@ frontend/            the site, served as-is (Vercel's output directory)
     pins.js          pin boards (window.pins), the largest file
     tour.js          first-run board walkthrough (window.tour)
     cloud.js         accounts and cloud sync (window.cloud)
+    share.js         Share panel: short links, passwords, new link, stop sharing; visitors' password prompt
   img/               og.jpg (link preview), favicon.svg
   pages/             privacy.html, terms.html (served at /privacy and /terms)
 backend/
@@ -75,7 +79,8 @@ backend/
     unsplash.js      GET proxy: holds the key, allow-lists endpoints and params, sets CDN cache headers
     log.js           POST endpoint: allow-lists and trims error reports, writes them to the logs
     config.js        GET: the public Supabase URL and anon key, or {} when accounts aren't set up
-    board.js         GET /b/<code>: index.html with the board's link-preview tags and the board embedded
+    board.js         GET /b/<code>: index.html with the board's link-preview tags and the board embedded;
+                     POST: a password-protected board, given the right password
   supabase/
     schema.sql       boards and shares tables, uploads bucket, row-level security, shared_board()
                      (run in Supabase; re-run after it changes)
@@ -93,7 +98,7 @@ index.html (root)    redirect from the old GitHub Pages URL
 
 Classic `<script>` files, each wrapped in an IIFE, loaded in this order:
 GSAP + ScrollTrigger + Flip + Lenis (CDN) → `js/api.js` → `js/media.js` → `js/pins.js` → `js/tour.js` →
-`js/cloud.js` → `js/canvas.js` (`js/errors.js` loads first, in `<head>`).
+`js/cloud.js` → `js/share.js` → `js/canvas.js` (`js/errors.js` loads first, in `<head>`).
 
 - **`api.js`** defines the shared globals the others rely on: `state` (current mode, query, filters,
   `photos`, paging token), `q`/`qa`, `api(path, params)`, `openLightbox`, `lb`, `lightbox`, `gsap`,
@@ -151,16 +156,25 @@ above that layer so strings end under the pin.
 
 ## Sharing and export
 
-- **Short share link (signed in, #18):** Share syncs the board, then makes (once per board) a row in
-  the `shares` table with a random 10-character code, and copies `/b/<code>`. The link points at the
-  board, not a snapshot, so it shows the latest synced copy. `backend/api/board.js` answers `/b/<code>`:
+- **Short share link (signed in, #18–19):** Share opens the share panel (`share.js`). *Create link*
+  syncs the board, then makes (once per board) a row in the `shares` table with a random 10-character
+  code, giving `/b/<code>`. The link points at the board, not a snapshot, so it shows the latest synced
+  copy. The panel also sets who can open it (anyone with the link, or only with a password), makes a
+  *New link* (a new code; the old address stops working, the password stays) and *Stop sharing*
+  (deletes the row). Passwords are hashed in the database (`set_share_password`, bcrypt) and the
+  browser never sees the hash. `backend/api/board.js` answers `/b/<code>`:
   it looks the board up through the public `shared_board(code)` function, which strips uploads, then
   serves `index.html` with the board's name, a description ("3 photos and 1 note…") and the first
   Unsplash photo (cropped 1200×630) in the title and `og:` tags, so chat apps show a real preview. It
   adds `<base href="/">` (the page lives under `/b/`) and embeds the board as JSON in
   `#shared-board`, which `pins.js` passes through `cleanBoard` and opens read-only. Cached at the
-  edge for 60 s; unknown codes get a 404 page that says the board is gone. Deleting the board (or
-  the account's data) removes its share.
+  edge for 15 s, so edits, a new password or *Stop sharing* reach the link quickly; unknown codes get a
+  404 page that says the board is gone. Deleting the board (or the account's data) removes its share.
+- **Password-protected link (#19):** the `/b/<code>` page embeds only `{ code, locked: true }` and a
+  generic preview (no name, counts or cover). Once the wall is up, `share.js` asks for the password
+  and POSTs `{ code, password }` to `/api/board` (never in a URL); the board comes back as JSON and
+  opens like any other. `shared_board()` counts wrong tries per link: after 10 in 15 minutes it stops
+  checking until the window ends (the visitor sees "too many wrong tries").
 - **Hash share link (signed out, or the account can't be reached):** the board is packed (format v2;
   v1 still opens), deflate-raw compressed and base64url-encoded into `#board=…`. Nothing is uploaded.
 - Both: uploads are left out, and recipients get a read-only copy they can save.
@@ -177,8 +191,11 @@ Supabase holds these, all locked to their owner by row-level security
 - **`boards` table:** one row per board per person: `owner`, `id`, `name`, `data` (the whole board as
   JSON), `updated` (the browser's last-edit time), `deleted` (tombstone).
 - **`uploads` bucket:** private; each person's images live under `<user id>/<item id>`.
-- **`shares` table:** `code`, `owner`, `board_id` (one per board). Nobody can list it; the only public
-  read is `shared_board(code)`, a security-definer function that returns one live board minus uploads.
+- **`shares` table:** `code`, `owner`, `board_id` (one per board), plus `pass_hash`, `fails`,
+  `fail_window` and a generated `protected` flag. Owners get column-level access only (read
+  `code, protected`; change `code`), so the hash and try counts stay server-side. Nobody can list
+  shares; the only public read is `shared_board(code, password)`, a security-definer function that
+  returns one live board minus uploads, or a status (`locked`, `wrong`, `slow`).
 
 `cloud.js` syncs on sign-in, 1.5 s after a local change, when the tab becomes visible or comes back
 online, and every 45 s while visible. Each sync:
@@ -207,7 +224,9 @@ All backend code is in `backend/api/`. The files in the root `api/` folder only 
   path, view and build, trimmed, and logs them with the prefix `[client-error]`. No IP, user agent
   or query strings.
 - **`board.js`**: `/b/<code>` (rewritten to `/api/board?code=`). Codes must be 10–16 letters or
-  digits or the database isn't asked. Reads `frontend/index.html` from disk (`includeFiles` in
+  digits or the database isn't asked. `POST /api/board` takes `{ code, password }` (body up to 2,000
+  chars, password up to 200) and answers 200 with the board, 403 wrong, 429 too many tries, 404 gone;
+  never cached. Reads `frontend/index.html` from disk (`includeFiles` in
   vercel.json), falling back to fetching `/`. Everything put into the HTML is escaped, and `<` in the
   embedded JSON is written as `\u003c`. A failed lookup is a 502 page that isn't cached. `noindex`.
 - **`config.js`**: returns `{ supabase: { url, anonKey } }` only when both env vars are set and the URL
@@ -223,11 +242,15 @@ All backend code is in `backend/api/`. The files in the root `api/` folder only 
   serves generated PNGs for `images.unsplash.com`, so no key is needed and the rate limit is never
   touched. `tests/fixtures.js` records `sendBeacon` calls, fails a test on any uncaught page error,
   and marks the walkthrough as seen (`tour.spec.js` turns it back on).
-- `tests/cloud.spec.js` also covers short share links: `/b/` pages come from the real `board.js`
-  (via its `respond(request, find)` export) reading the fake's boards.
+- `tests/cloud.spec.js` also covers share links and passwords: `/b/` pages and `POST /api/board`
+  come from the real `board.js` (its `respond` / `unlock(request, find)` exports) reading the fake's
+  boards, which mimics `shared_board()`'s statuses.
 - `tests/cloud.spec.js`: accounts and sync against an in-memory Supabase stand-in in the test process
   (`window.__apertureBackend`), with ownership enforced like row-level security. Two browser profiles
   act as two devices. Other tests get `{}` from `/api/config`, so they stay local-only.
+- `tests/supabase-lock.spec.js`: the real Supabase wrapper in `cloud.js` against a stand-in library that,
+  like supabase-js, runs auth callbacks inside its lock. Guards against the start-up deadlock (sync stuck
+  on "Syncing…"): `cloud.js` reacts to auth changes only after the callback returns.
 - `tests/a11y.spec.js`: axe-core, fails on serious or critical issues.
 - CI (`.github/workflows/test.yml`) has no GPU, so `CI` or `SOFTWARE_GL=1` switches Chromium to
   software WebGL and the fixtures switch off CSS blurs (decoration only), which would otherwise make the

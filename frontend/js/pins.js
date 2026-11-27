@@ -3132,9 +3132,10 @@
     });
 
     /* ---------- share as a link ---------- */
-    // Signed in: a short /b/<code> link to the synced board (cloud.js, #18), which
-    // stays current and gets a real link preview. Otherwise the board is
-    // compressed into the URL fragment, so nothing is uploaded anywhere.
+    // Signed in: Share opens the share panel (share.js) for a short /b/<code>
+    // link to the synced board, which stays current, gets a real link preview
+    // and can need a password (#18–19). Signed out: the board is compressed
+    // into the URL fragment, so nothing is uploaded anywhere.
     // Either way uploaded images are left out.
     const b64u = (bytes) => {
         let s = "";
@@ -3244,21 +3245,6 @@
         );
     }
 
-    // the link as a promise that never rejects: { url, short, failed }
-    async function makeLink(packed) {
-        let failed = false;
-        if (window.cloud?.user?.()) {
-            try {
-                const url = await window.cloud.shareLink(index.active);
-                if (url) return { url, short: true };
-            } catch (err) {
-                failed = true;
-                window.reportProblem?.("short share link failed", err);
-            }
-        }
-        return { url: `${location.origin}/#board=${await pack(packed)}`, short: false, failed };
-    }
-
     // Safari only allows a clipboard write during the click itself, so the text is
     // handed over as a promise straight away and filled in when the link is ready.
     async function copyLater(text) {
@@ -3284,23 +3270,19 @@
         try {
             const packed = packBoard();
             if (!packed.i.length) return toast("Uploaded images can't go in a share link. Export the board file instead.", "warn");
+            if (window.cloud?.user?.() && window.share) return void window.share.open({ boardId: index.active, skipped: packed.skipped });
             sharing = true;
-            const made = makeLink(packed).catch(() => ({ url: "", short: false, failed: true }));
-            if (window.cloud?.user?.()) label.textContent = "Linking…";
-            const copiedP = copyLater(made.then((r) => r.url));
-            const { url, short, failed } = await made;
-            if (!url) throw new Error("no link");
+            const made = pack(packed).then((z) => `${location.origin}/#board=${z}`);
+            const copiedP = copyLater(made.catch(() => ""));
+            const url = await made;
             const copied = await copiedP;
             if (!copied) window.prompt("Copy this link to share the board:", url);
             const kb = Math.round(url.length / 1024);
             label.textContent = copied ? "Link copied ✓" : "Share";
             const notes = [];
-            if (short) notes.push("it shows the board as you keep editing it");
-            if (failed) notes.push("your account couldn't be reached, so it carries the whole board");
             if (packed.skipped) notes.push(`${packed.skipped} uploaded image${packed.skipped === 1 ? " isn't" : "s aren't"} included`);
-            if (!short && kb > 6) notes.push(`it's long (${kb} KB), so some chat apps may cut it${window.cloud?.state?.() === "out" ? ". Sign in for a short link" : ""}`);
-            const warn = failed || packed.skipped || (!short && kb > 6);
-            if (copied) toast(`Share link copied${notes.length ? ` — ${notes.join("; ")}` : ""}`, warn ? "warn" : "");
+            if (kb > 6) notes.push(`it's long (${kb} KB), so some chat apps may cut it${window.cloud?.state?.() === "out" ? ". Sign in for a short link" : ""}`);
+            if (copied) toast(`Share link copied${notes.length ? ` — ${notes.join("; ")}` : ""}`, notes.length ? "warn" : "");
             setTimeout(() => (label.textContent = "Share"), 2200);
         } catch (err) {
             label.textContent = "Share";
@@ -3385,14 +3367,25 @@
         try {
             s = JSON.parse(el.textContent);
         } catch (e) {}
+        const toBoard = (x) => cleanBoard({ ...x.data, name: x.name }, "Shared board");
+        // password-protected (#19): ask once the wall is up, then fetch the board (share.js)
+        if (s?.locked && typeof s.code === "string") {
+            return showShared(async () => {
+                const got = await window.share?.unlock(s.code);
+                if (got?.data && typeof got.data === "object") return toBoard(got);
+                leavePath();
+                return null;
+            });
+        }
         if (!s?.data || typeof s.data !== "object") {
             leavePath();
             return toast(s?.error ? "Couldn't load that shared board. Try the link again in a moment." : "That shared board doesn't exist any more. Its owner may have deleted it.", "warn");
         }
-        showShared(cleanBoard({ ...s.data, name: s.name }, "Shared board"));
+        showShared(toBoard(s));
     }
 
-    function showShared(data) {
+    // `source` is the board, or an async function that gives it (null: give up)
+    function showShared(source) {
         // wait for the first page so the canvas (which hosts the board) can open
         const t0 = Date.now();
         const wait = setInterval(() => {
@@ -3402,7 +3395,9 @@
             if (!ready) return;
             window.canvasView.open();
             setTimeout(
-                () => {
+                async () => {
+                    const data = typeof source === "function" ? await source() : source;
+                    if (!data) return;
                     enterShared(data);
                     if (board.hidden) openBoard();
                     else fit(false);

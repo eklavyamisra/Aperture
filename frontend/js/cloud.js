@@ -5,7 +5,8 @@
    the newer copy wins. Deletes leave a tombstone so other devices drop the
    board too. Uploaded images go to a private storage bucket under the
    user's id. A board can also get a short share link (/b/<code>, #18)
-   that always shows its latest synced copy.
+   that always shows its latest synced copy, optionally behind a password
+   (#19). The Share panel for that is share.js; this holds the calls.
 
    Off unless /api/config returns Supabase settings: then the account
    button stays hidden and nothing here runs. Tests swap in their own
@@ -71,7 +72,13 @@
                 return who(must(await sb.auth.getSession()).session);
             },
             onChange(cb) {
-                sb.auth.onAuthStateChange((_event, s) => cb(who(s)));
+                // supabase-js runs these callbacks inside its auth lock and waits for them, and
+                // every query needs that lock: so react only after the callback has returned,
+                // or the first sync waits on itself forever ("Syncing…" that never ends)
+                sb.auth.onAuthStateChange((_event, s) => {
+                    const u = who(s);
+                    setTimeout(() => cb(u), 0);
+                });
             },
             async signInEmail(email) {
                 must(await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: back } }));
@@ -99,11 +106,20 @@
                 return error ? null : data;
             },
             async findShare(boardId) {
-                const rows = must(await sb.from("shares").select("code").eq("board_id", boardId).limit(1));
-                return rows[0]?.code || null;
+                const rows = must(await sb.from("shares").select("code, protected").eq("board_id", boardId).limit(1));
+                return rows[0] || null;
             },
             async createShare(code, boardId) {
                 must(await sb.from("shares").insert({ code, board_id: boardId, owner: user.id }));
+            },
+            async renameShare(boardId, code) {
+                must(await sb.from("shares").update({ code }).eq("board_id", boardId));
+            },
+            async setSharePassword(boardId, password) {
+                must(await sb.rpc("set_share_password", { board: boardId, password }));
+            },
+            async deleteShare(boardId) {
+                must(await sb.from("shares").delete().eq("board_id", boardId));
             },
             async wipe() {
                 must(await sb.from("boards").delete().eq("owner", user.id));
@@ -256,25 +272,51 @@
         return out;
     }
 
-    // "/b/<code>" for this board, made on first use. The board is synced first, so
-    // the link shows what's on screen. null when signed out (pins.js falls back to
-    // a #board= link); throws if the account can't be reached.
-    async function shareLink(boardId) {
-        if (!user || !backend?.createShare) return null;
-        await sync();
-        if (state !== "synced") throw new Error(lastError || "couldn't sync the board");
-        let code = await backend.findShare(boardId);
-        if (!code) {
+    const linkOf = (row) => (row ? { url: `${location.origin}/b/${row.code}`, code: row.code, protected: !!row.protected } : null);
+
+    function needAccount() {
+        if (!user || !backend?.createShare) throw new Error("not signed in");
+    }
+
+    // Each returns this board's link as { url, code, protected }, or null when it isn't shared.
+    const share = {
+        async get(boardId) {
+            needAccount();
+            return linkOf(await backend.findShare(boardId));
+        },
+        // made once per board; the board is synced first so the link shows what's on screen
+        async create(boardId) {
+            needAccount();
+            await sync();
+            if (state !== "synced") throw new Error(lastError || "couldn't sync the board");
+            const had = await backend.findShare(boardId);
+            if (had) return linkOf(had);
             try {
                 await backend.createShare(newCode(), boardId);
             } catch (err) {
                 // made meanwhile (a second click, another device): use that one
                 if (!(await backend.findShare(boardId))) throw err;
             }
-            code = await backend.findShare(boardId);
-        }
-        return `${location.origin}/b/${code}`;
-    }
+            return linkOf(await backend.findShare(boardId));
+        },
+        // a new address for the same board: the old link stops working, the password stays
+        async renew(boardId) {
+            needAccount();
+            await backend.renameShare(boardId, newCode());
+            return linkOf(await backend.findShare(boardId));
+        },
+        // null removes the password
+        async setPassword(boardId, password) {
+            needAccount();
+            await backend.setSharePassword(boardId, password);
+            return linkOf(await backend.findShare(boardId));
+        },
+        async stop(boardId) {
+            needAccount();
+            await backend.deleteShare(boardId);
+            return null;
+        },
+    };
 
     /* ---------- sign in / out ---------- */
 
@@ -464,6 +506,6 @@
         if (u) signedIn(u);
     }
 
-    window.cloud = { sync, shareLink, state: () => state, user: () => user, open, close };
+    window.cloud = { sync, share, state: () => state, user: () => user, open, close };
     start();
 })();

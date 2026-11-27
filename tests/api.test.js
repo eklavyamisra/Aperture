@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { GET } from "../backend/api/unsplash.js";
 import { POST } from "../backend/api/log.js";
 import { GET as config } from "../backend/api/config.js";
-import { GET as boardPage, respond as boardRespond } from "../backend/api/board.js";
+import { GET as boardPage, respond as boardRespond, unlock as boardUnlock } from "../backend/api/board.js";
 
 /* ---------- api/unsplash.js ---------- */
 
@@ -151,7 +151,7 @@ test("board page: fills the preview tags and embeds the board", async () => {
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type"), /text\/html/);
     assert.equal(res.headers.get("x-robots-tag"), "noindex");
-    assert.match(res.headers.get("cdn-cache-control"), /s-maxage=60/);
+    assert.match(res.headers.get("cdn-cache-control"), /s-maxage=15/);
     const html = await res.text();
     assert.match(html, /<base href="\/">/);
     assert.match(html, /<title>Trip &lt;moodboard&gt; &amp; &quot;more&quot; — Aperture<\/title>/);
@@ -225,6 +225,87 @@ test("board page: looks the code up through Supabase's shared_board() with the a
         assert.equal(seen[0].init.method, "POST");
         assert.equal(seen[0].init.headers.apikey, process.env.SUPABASE_ANON_KEY);
         assert.deepEqual(JSON.parse(seen[0].init.body), { share_code: "AbCdEf1234" });
+    } finally {
+        globalThis.fetch = keep.fetch;
+        for (const [k, v] of [["SUPABASE_URL", keep.url], ["SUPABASE_ANON_KEY", keep.key]]) {
+            if (v === undefined) delete process.env[k];
+            else process.env[k] = v;
+        }
+    }
+});
+
+/* ---------- passwords (#19) ---------- */
+
+const PASS = "fern-gully";
+// a stand-in for shared_board(code, password) with one protected board
+const guarded = (state = { fails: 0 }) => async (code, password) => {
+    if (code !== "AbCdEf1234") return null;
+    if (password === undefined || password === null) return { status: "locked", name: null, data: null };
+    if (state.fails >= 10) return { status: "slow", name: null, data: null };
+    if (password !== PASS) return state.fails++, { status: "wrong", name: null, data: null };
+    return { status: "ok", ...sample };
+};
+
+const post = (body) => new Request("https://aperture.example/api/board", { method: "POST", body: typeof body === "string" ? body : JSON.stringify(body) });
+
+test("board page: a password-protected board's page holds no board and a generic preview", async () => {
+    const res = await boardRespond(new Request("https://aperture.example/api/board?code=AbCdEf1234"), guarded());
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.deepEqual(embedded(html), { code: "AbCdEf1234", locked: true });
+    assert.equal(tag(html, 'property="og:title"'), "Password-protected board");
+    assert.equal(tag(html, 'property="og:image"'), "https://aperture.example/img/og.jpg");
+    assert.ok(!html.includes("Trip"), "board name leaked");
+    assert.ok(!html.includes("images.unsplash.com/photo-1"), "cover leaked");
+});
+
+test("board unlock: right password gives the board, wrong ones don't", async () => {
+    const state = { fails: 0 };
+    const find = guarded(state);
+    const ok = await boardUnlock(post({ code: "AbCdEf1234", password: PASS }), find);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.headers.get("cache-control"), "no-store");
+    const board = await ok.json();
+    assert.equal(board.name, sample.name);
+    assert.equal(board.data.pins.length, 4);
+
+    const wrong = await boardUnlock(post({ code: "AbCdEf1234", password: "nope" }), find);
+    assert.equal(wrong.status, 403);
+    assert.deepEqual(await wrong.json(), { error: "wrong" });
+
+    state.fails = 10;
+    const slow = await boardUnlock(post({ code: "AbCdEf1234", password: PASS }), find);
+    assert.equal(slow.status, 429);
+
+    const gone = await boardUnlock(post({ code: "ZzZzZz9999", password: PASS }), find);
+    assert.equal(gone.status, 404);
+});
+
+test("board unlock: rejects malformed requests without a lookup", async () => {
+    let calls = 0;
+    const find = async () => (calls++, null);
+    for (const body of ["", "not json", "x".repeat(3000), { code: "AbCdEf1234" }, { code: "AbCdEf1234", password: "" }, { code: "bad", password: PASS }, { code: "AbCdEf1234", password: 5 }, { code: "AbCdEf1234", password: "p".repeat(201) }]) {
+        const r = await boardUnlock(post(body), find);
+        assert.equal(r.status, 400, JSON.stringify(body).slice(0, 40));
+    }
+    assert.equal(calls, 0);
+});
+
+test("board unlock: sends the password to shared_board() in the body", async () => {
+    const keep = { url: process.env.SUPABASE_URL, key: process.env.SUPABASE_ANON_KEY, fetch: globalThis.fetch };
+    process.env.SUPABASE_URL = "https://abcd1234.supabase.co";
+    process.env.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.public-anon";
+    const seen = [];
+    globalThis.fetch = async (url, init) => {
+        seen.push({ url: String(url), init });
+        return new Response(JSON.stringify([{ status: "ok", ...sample }]), { status: 200 });
+    };
+    try {
+        const { POST } = await import("../backend/api/board.js");
+        const res = await POST(post({ code: "AbCdEf1234", password: PASS }));
+        assert.equal(res.status, 200);
+        assert.equal(seen[0].url, "https://abcd1234.supabase.co/rest/v1/rpc/shared_board");
+        assert.deepEqual(JSON.parse(seen[0].init.body), { share_code: "AbCdEf1234", password: PASS });
     } finally {
         globalThis.fetch = keep.fetch;
         for (const [k, v] of [["SUPABASE_URL", keep.url], ["SUPABASE_ANON_KEY", keep.key]]) {

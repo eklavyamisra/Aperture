@@ -417,6 +417,54 @@
 
     <p class="toast mono" id="toast" role="status" aria-live="polite"></p>
 
+    <!-- ============ SHARE (owner panel + visitor's password prompt) ============ -->
+    <div class="acct share" id="share" role="dialog" aria-modal="true" aria-labelledby="share-title" hidden>
+        <div class="acct-card">
+            <button type="button" class="acct-close" aria-label="Close">✕</button>
+            <div data-view="owner">
+                <p class="acct-kicker mono">Share</p>
+                <h3 class="acct-title" id="share-title">Share this board.</h3>
+                <p class="acct-text" id="share-status" role="status"></p>
+                <div id="share-off" hidden>
+                    <button type="button" class="acct-primary mono" id="share-create">Create link</button>
+                </div>
+                <div id="share-on" hidden>
+                    <div class="share-link">
+                        <label class="sr-only" for="share-url">Share link</label>
+                        <input type="text" id="share-url" readonly spellcheck="false">
+                        <button type="button" class="acct-primary mono" id="share-copy">Copy</button>
+                    </div>
+                    <fieldset class="share-access">
+                        <legend class="acct-kicker mono">Who can open it</legend>
+                        <label class="share-choice"><input type="radio" name="share-access" id="share-anyone" value="link"> Anyone with the link</label>
+                        <label class="share-choice"><input type="radio" name="share-access" id="share-withpass" value="password"> Only people with the password</label>
+                    </fieldset>
+                    <form class="acct-form share-pass" id="share-pass-form" hidden>
+                        <label class="sr-only" for="share-pass">Password</label>
+                        <input type="password" id="share-pass" maxlength="72" autocomplete="new-password" placeholder="Password (4 or more characters)">
+                        <button type="submit" class="acct-primary mono" id="share-pass-save">Set password</button>
+                    </form>
+                    <div class="acct-row share-actions">
+                        <button type="button" class="acct-quiet mono" id="share-renew">New link</button>
+                        <button type="button" class="acct-quiet mono" id="share-stop">Stop sharing</button>
+                    </div>
+                </div>
+                <p class="acct-fine" id="share-note"></p>
+            </div>
+            <div data-view="unlock" hidden>
+                <p class="acct-kicker mono">Shared board</p>
+                <h3 class="acct-title" id="share-unlock-title">This board needs a password.</h3>
+                <p class="acct-text">Ask the person who sent you the link for it.</p>
+                <form class="acct-form" id="share-unlock-form">
+                    <label class="sr-only" for="share-unlock-pass">Password</label>
+                    <input type="password" id="share-unlock-pass" required maxlength="200" autocomplete="current-password" placeholder="Password">
+                    <button type="submit" class="acct-primary mono">Open board</button>
+                </form>
+            </div>
+            <p class="acct-error" id="share-error" role="alert"></p>
+        </div>
+    </div>
+
     <!-- ============ LIGHTBOX ============ -->
     <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-labelledby="lb-title" data-lenis-prevent hidden>
         <div class="lb-bg"></div>
@@ -487,6 +535,7 @@
     <script src="js/pins.js"></script>
     <script src="js/tour.js"></script>
     <script src="js/cloud.js"></script>
+    <script src="js/share.js"></script>
     <script src="js/canvas.js"></script>
 </body>
 </html>

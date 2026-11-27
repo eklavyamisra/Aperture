@@ -9,7 +9,7 @@ import { extname, join, normalize } from "node:path";
 import { GET } from "./backend/api/unsplash.js";
 import { POST as logPOST } from "./backend/api/log.js";
 import { GET as configGET } from "./backend/api/config.js";
-import { GET as boardGET } from "./backend/api/board.js";
+import { GET as boardGET, POST as boardPOST } from "./backend/api/board.js";
 
 const root = new URL("./frontend/", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
 const PORT = +process.env.PORT || 5173;
@@ -80,7 +80,12 @@ createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/board") {
-        const r = await boardGET(new Request(url));
+        let r;
+        if (req.method === "POST") {
+            const chunks = [];
+            for await (const c of req) chunks.push(c);
+            r = await boardPOST(new Request(url, { method: "POST", body: Buffer.concat(chunks) }));
+        } else r = await boardGET(new Request(url));
         res.writeHead(r.status, Object.fromEntries(r.headers));
         return res.end(await r.text());
     }

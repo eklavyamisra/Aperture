@@ -8,7 +8,7 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 |---|---|---|
 | 0 | Fix before more users arrive | ✅ 4 of 5 (approval left until needed) |
 | 1 | Make the board useful without Unsplash | ✅ 9 of 9 |
-| 2 | Accounts and the cloud (paid tier starts here) | 🟡 4 of 6 (Supabase) |
+| 2 | Accounts and the cloud (paid tier starts here) | 🟡 5 of 6 (Supabase) |
 | 3 | Teams and money | ⬜ |
 | Alongside | Growth and quality | 🟡 3 of 5 |
 
@@ -47,8 +47,8 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 | 15 | Accounts (email magic link or Google) | M | ✅ live |
 | 16 | Cloud sync of boards across devices | L | ✅ live (newest edit wins per board; offline-first) |
 | 17 | Image storage for uploads | M | ✅ live (private bucket per user) |
-| 18 | Shared boards with real link previews (short URLs) | M | ✅ built; live once the updated `schema.sql` is run (`/b/<code>`, signed-in only; the link always shows the latest synced board; uploads left out) |
-| 19 | Private and password-protected share links | S | ⬜ |
+| 18 | Shared boards with real link previews (short URLs) | M | ✅ live (`/b/<code>`, signed-in only; the link always shows the latest synced board; uploads left out) |
+| 19 | Private and password-protected share links | S | ✅ built (Share panel: anyone with the link, or password only; New link; Stop sharing). "Private" means the owner decides who can open it; invite-by-email isn't included |
 | 20 | Comments on shared boards | M | ⬜ |
 
 ## Phase 3: Teams and money
@@ -80,8 +80,8 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 
 ## Suggested next steps
 
-1. #19 private and password-protected links (builds on #18's `shares` table; also add "stop sharing"), then #20 comments.
-   Follow-ups to #15–18: full account deletion from inside the app (needs a server key), live updates instead of the 45 s sync check,
+1. #20 comments on shared boards (needs a decision: may viewers without an account comment?).
+   Follow-ups to #15–19: full account deletion from inside the app (needs a server key), live updates instead of the 45 s sync check,
    and showing uploaded images on shared boards (signed URLs from the private bucket).
 2. #27 landing page and waitlist (can share the same backend for storing emails).
 3. #22 presentation mode and #23 PDF export are client-only and can be done any time.

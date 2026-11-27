@@ -62,6 +62,37 @@ test("a11y: account dialog", async ({ page }, info) => {
     await scan(page, info, "account", "#acct");
 });
 
+test("a11y: share panel and password prompt", async ({ page }, info) => {
+    // signed in, with a board that already has a password-protected link
+    await page.addInitScript(() => {
+        window.__apertureBackend = {
+            session: async () => ({ id: "user-1", email: "a11y@example.com" }),
+            onChange() {},
+            signOut: async () => {},
+            list: async () => [],
+            get: async () => [],
+            upsert: async () => {},
+            putBlob: async () => {},
+            getBlob: async () => null,
+            findShare: async () => ({ code: "AbCdEf1234", protected: true }),
+            createShare: async () => {},
+        };
+    });
+    await openGrid(page);
+    await page.evaluate(() => state.photos.slice(0, 2).forEach((p) => window.pins.toggle(p)));
+    await openBoard(page);
+    await page.locator("#pb-share").click();
+    await expect(page.locator("#share-pass-form")).toBeVisible();
+    await expect(page.locator("#share-copy")).toBeFocused();
+    await scan(page, info, "share", "#share");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#share")).toBeHidden();
+
+    await page.evaluate(() => void window.share.unlock("AbCdEf1234"));
+    await expect(page.locator("#share-unlock-pass")).toBeFocused();
+    await scan(page, info, "unlock", "#share");
+});
+
 for (const path of ["/privacy", "/terms"]) {
     test(`a11y: ${path}`, async ({ page }, info) => {
         await page.goto(path);

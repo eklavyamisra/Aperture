@@ -4,7 +4,7 @@
 // security: each call only sees the signed-in user's rows and files.
 import fs from "node:fs";
 import { test, expect, openGrid, openBoard, boardItems, png } from "./fixtures.js";
-import { respond as boardPage } from "../backend/api/board.js";
+import { respond as boardPage, unlock as boardUnlock } from "../backend/api/board.js";
 
 class FakeCloud {
     constructor() {
@@ -12,16 +12,25 @@ class FakeCloud {
         this.sessions = new Map(); // browser context -> user
         this.rows = new Map(); // `${owner}|${id}` -> row
         this.blobs = new Map(); // path -> data URL
-        this.shares = new Map(); // code -> { owner, boardId }
+        this.shares = new Map(); // code -> { owner, boardId, pass, fails }
     }
-    // what Supabase's public shared_board(code) returns (schema.sql)
-    sharedBoard(code) {
+    // what Supabase's public shared_board(code, password) returns (schema.sql)
+    sharedBoard(code, password = null) {
         const s = this.shares.get(code);
         const r = s && this.rows.get(`${s.owner}|${s.boardId}`);
         if (!r || r.deleted || !r.data) return null;
+        const none = (status) => ({ status, name: null, data: null, updated: null });
+        if (s.pass) {
+            if (password == null) return none("locked");
+            if (s.fails >= 10) return none("slow");
+            if (password !== s.pass) return s.fails++, none("wrong");
+        }
         const data = JSON.parse(JSON.stringify(r.data));
         data.pins = data.pins.filter((x) => x.kind !== "upload");
-        return { name: r.name, data, updated: r.updated };
+        return { status: "ok", name: r.name, data, updated: r.updated };
+    }
+    shareOf(boardOwner, boardId) {
+        return [...this.shares].find(([, s]) => s.owner === boardOwner && s.boardId === boardId) || null;
     }
     userFor(email) {
         if (!this.users.has(email)) this.users.set(email, `user-${this.users.size + 1}`);
@@ -66,15 +75,39 @@ class FakeCloud {
             case "getBlob":
                 mine();
                 return arg.startsWith(`${me.id}/`) ? this.blobs.get(arg) || null : null;
-            case "findShare":
+            case "findShare": {
                 mine();
-                return [...this.shares].find(([, s]) => s.owner === me.id && s.boardId === arg)?.[0] || null;
+                const hit = this.shareOf(me.id, arg);
+                return hit ? { code: hit[0], protected: !!hit[1].pass } : null;
+            }
+            case "renameShare": {
+                mine();
+                const hit = this.shareOf(me.id, arg.boardId);
+                if (!hit || !/^[A-Za-z0-9]{10,16}$/.test(arg.code)) throw new Error("can't rename");
+                this.shares.delete(hit[0]);
+                this.shares.set(arg.code, hit[1]);
+                return null;
+            }
+            case "setSharePassword": {
+                mine();
+                const hit = this.shareOf(me.id, arg.boardId);
+                if (!hit) throw new Error("board is not shared");
+                if (arg.password != null && (arg.password.length < 4 || arg.password.length > 72)) throw new Error("password must be 4 to 72 characters");
+                Object.assign(hit[1], { pass: arg.password ?? null, fails: 0 });
+                return null;
+            }
+            case "deleteShare": {
+                mine();
+                const hit = this.shareOf(me.id, arg);
+                if (hit) this.shares.delete(hit[0]);
+                return null;
+            }
             case "createShare": {
                 mine();
                 if (!/^[A-Za-z0-9]{10,16}$/.test(arg.code)) throw new Error("bad code");
                 if (!this.rows.has(`${me.id}|${arg.boardId}`)) throw new Error("board isn't in the account");
                 if (this.shares.has(arg.code) || [...this.shares.values()].some((s) => s.owner === me.id && s.boardId === arg.boardId)) throw new Error("duplicate");
-                this.shares.set(arg.code, { owner: me.id, boardId: arg.boardId });
+                this.shares.set(arg.code, { owner: me.id, boardId: arg.boardId, pass: null, fails: 0 });
                 return null;
             }
             case "wipe":
@@ -125,17 +158,49 @@ async function installCloud(context, cloud) {
             },
             findShare: (boardId) => call("findShare", boardId),
             createShare: (code, boardId) => call("createShare", { code, boardId }),
+            renameShare: (boardId, code) => call("renameShare", { boardId, code }),
+            setSharePassword: (boardId, password) => call("setSharePassword", { boardId, password }),
+            deleteShare: (boardId) => call("deleteShare", boardId),
             wipe: () => call("wipe"),
         };
     });
 }
 
-// /b/<code> pages come from the real page function, reading boards from the fake
+// /b/<code> pages and password checks come from the real page function, reading boards from the fake
 async function serveSharePages(context, cloud) {
-    await context.route("**/b/*", async (route) => {
-        const res = await boardPage(new Request(route.request().url()), async (code) => cloud.sharedBoard(code));
-        await route.fulfill({ status: res.status, headers: Object.fromEntries(res.headers), body: await res.text() });
+    const find = async (code, password) => cloud.sharedBoard(code, password);
+    const pass = async (route, res) => route.fulfill({ status: res.status, headers: Object.fromEntries(res.headers), body: await res.text() });
+    await context.route("**/b/*", async (route) => pass(route, await boardPage(new Request(route.request().url()), find)));
+    await context.route("**/api/board", async (route) => {
+        const r = route.request();
+        await pass(route, await boardUnlock(new Request(r.url(), { method: "POST", body: r.postData() || "" }), find));
     });
+}
+
+// open the Share panel on the signed-in board
+async function openSharePanel(page) {
+    await page.locator("#pb-share").click();
+    await expect(page.locator("#share")).toBeVisible();
+    await expect(page.locator("#share-status")).not.toHaveText(/Checking/, { timeout: 15000 });
+}
+
+async function closeSharePanel(page) {
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#share")).toBeHidden();
+}
+
+// a board with three photos and an upload, signed in
+async function sharedSetup(page, cloud, email, info) {
+    await installCloud(page.context(), cloud);
+    page.on("dialog", (d) => d.accept());
+    await openGrid(page);
+    await page.evaluate(() => state.photos.slice(0, 3).forEach((p) => window.pins.toggle(p)));
+    await openBoard(page);
+    const file = info.outputPath("upload.png");
+    fs.writeFileSync(file, png("#c8553d", 320, 240));
+    await page.setInputFiles("#pb-file", file);
+    await page.waitForSelector(".pb-card.is-upload img[src^='blob:']", { timeout: 15000 });
+    await signIn(page, email);
 }
 
 async function signIn(page, email) {
@@ -283,27 +348,26 @@ test("cloud: a signed-in board gets a short share link that stays current", asyn
     const cloud = new FakeCloud();
     const A = page;
     const B = freshPage;
-    await installCloud(A.context(), cloud);
     await serveSharePages(B.context(), cloud);
     const email = "lin@example.com";
+    await sharedSetup(A, cloud, email, info);
     let link;
 
-    await test.step("Share on a signed-in board copies a /b/ link", async () => {
-        await openGrid(A);
-        await A.evaluate(() => state.photos.slice(0, 3).forEach((p) => window.pins.toggle(p)));
-        await openBoard(A);
-        const file = info.outputPath("upload.png");
-        fs.writeFileSync(file, png("#c8553d", 320, 240));
-        await A.setInputFiles("#pb-file", file);
-        await A.waitForSelector(".pb-card.is-upload img[src^='blob:']", { timeout: 15000 });
-        await signIn(A, email);
-        await A.locator("#pb-share").click();
-        await expect(A.locator("#pb-share")).toContainText("Link copied", { timeout: 15000 });
-        await expect(A.locator("#toast")).toContainText("as you keep editing");
-        await expect(A.locator("#toast")).toContainText("1 uploaded image isn't included");
+    await test.step("Share opens the panel; Create link makes a /b/ link and Copy copies it", async () => {
+        await openSharePanel(A);
+        await expect(A.locator("#share-status")).toContainText("Only you can see this board");
+        await expect(A.locator("#share-note")).toContainText("1 uploaded image isn't shown");
+        await A.locator("#share-create").click();
+        await expect(A.locator("#share-url")).toHaveValue(/\/b\/[A-Za-z0-9]{10}$/, { timeout: 15000 });
+        await expect(A.locator("#share-anyone")).toBeChecked();
+        await A.locator("#share-copy").click();
+        await expect(A.locator("#share-copy")).toHaveText("Copied ✓");
         link = await A.evaluate(() => navigator.clipboard.readText());
         expect(link).toMatch(/^http:\/\/localhost:\d+\/b\/[A-Za-z0-9]{10}$/);
+        expect(link).toBe(await A.locator("#share-url").inputValue());
         expect(cloud.shares.size).toBe(1);
+        await closeSharePanel(A);
+        await expect(A.locator("#pb-share")).toBeFocused();
     });
 
     await test.step("the link opens the board read-only, without uploads", async () => {
@@ -318,13 +382,13 @@ test("cloud: a signed-in board gets a short share link that stays current", asyn
     await test.step("later edits reach the same link", async () => {
         await A.locator("#pb-area").focus();
         await A.keyboard.press("n");
-        await A.waitForTimeout(300);
+        await expect(A.locator(".pb-card.is-note .pb-note")).toBeFocused();
         await A.keyboard.type("Call sheet");
         await A.keyboard.press("Escape");
-        await A.waitForTimeout(2200); // the Share label resets
-        await A.locator("#pb-share").click();
-        await expect(A.locator("#pb-share")).toContainText("Link copied", { timeout: 15000 });
-        expect(await A.evaluate(() => navigator.clipboard.readText())).toBe(link);
+        await expect.poll(() => cloud.boards(email)[0].data.pins.some((x) => x.note === "Call sheet"), { timeout: 15000 }).toBe(true);
+        await openSharePanel(A);
+        await expect(A.locator("#share-url")).toHaveValue(link);
+        await closeSharePanel(A);
         expect(cloud.shares.size).toBe(1);
         await B.reload();
         await B.waitForSelector("#pb.is-readonly:not([hidden])", { timeout: 30000 });
@@ -346,5 +410,96 @@ test("cloud: a signed-in board gets a short share link that stays current", asyn
         await B.goto(link);
         await expect(B.locator("#toast")).toContainText("doesn't exist any more", { timeout: 30000 });
         expect(await B.evaluate(() => location.pathname)).toBe("/");
+    });
+});
+
+test("cloud: password-protected links, new links and stop sharing", async ({ page, freshPage }, info) => {
+    const cloud = new FakeCloud();
+    const A = page;
+    const B = freshPage;
+    await serveSharePages(B.context(), cloud);
+    await sharedSetup(A, cloud, "kit@example.com", info);
+    let link;
+
+    await test.step("the owner sets a password", async () => {
+        await openSharePanel(A);
+        await A.locator("#share-create").click();
+        await expect(A.locator("#share-url")).toHaveValue(/\/b\//, { timeout: 15000 });
+        link = await A.locator("#share-url").inputValue();
+        await A.locator("#share-withpass").check();
+        await expect(A.locator("#share-pass")).toBeFocused();
+        await A.locator("#share-pass").fill("abc");
+        await A.locator("#share-pass-save").click();
+        await expect(A.locator("#share-error")).toHaveText("Use a password of 4 to 72 characters.");
+        await A.locator("#share-pass").fill("north light");
+        await A.locator("#share-pass-save").click();
+        await expect(A.locator("#share-status")).toContainText("the link and the password", { timeout: 15000 });
+        await expect(A.locator("#share-pass-save")).toHaveText("Change");
+        await expect(A.locator("#share-pass")).toHaveValue("");
+        expect([...cloud.shares.values()][0].pass).toBe("north light");
+        await closeSharePanel(A);
+    });
+
+    await test.step("a visitor needs the password; the page itself holds no board", async () => {
+        await B.goto(link);
+        expect(await B.title()).toBe("Password-protected board — Aperture");
+        const html = await B.evaluate((u) => fetch(u).then((r) => r.text()), link);
+        expect(html).toContain('"locked":true');
+        expect(html).not.toContain("images.unsplash.com/photo-mock"); // no cover, no board
+        expect(html).not.toContain('"pins"');
+        await expect(B.locator("#share [data-view=unlock]")).toBeVisible({ timeout: 30000 });
+        await expect(B.locator("#share-unlock-pass")).toBeFocused();
+        await B.locator("#share-unlock-pass").fill("south light");
+        await B.keyboard.press("Enter");
+        await expect(B.locator("#share-error")).toHaveText("That password isn't right.");
+        await B.locator("#share-unlock-pass").fill("north light");
+        await B.keyboard.press("Enter");
+        await expect(B.locator("#share")).toBeHidden();
+        await B.waitForSelector("#pb.is-readonly:not([hidden])", { timeout: 30000 });
+        await expect(B.locator(".pb-card")).toHaveCount(3);
+    });
+
+    await test.step("too many wrong tries are refused", async () => {
+        [...cloud.shares.values()][0].fails = 10;
+        await B.goto(link);
+        await expect(B.locator("#share [data-view=unlock]")).toBeVisible({ timeout: 30000 });
+        await B.locator("#share-unlock-pass").fill("north light");
+        await B.keyboard.press("Enter");
+        await expect(B.locator("#share-error")).toContainText("Too many wrong tries");
+        await B.keyboard.press("Escape");
+        await expect(B.locator("#share")).toBeHidden();
+        await expect(B.locator("#pb.is-readonly")).toHaveCount(0);
+        expect(await B.evaluate(() => location.pathname)).toBe("/");
+    });
+
+    await test.step("back to anyone with the link removes the password", async () => {
+        await openSharePanel(A);
+        await expect(A.locator("#share-withpass")).toBeChecked();
+        await A.locator("#share-anyone").check();
+        await expect(A.locator("#share-status")).toContainText("Anyone with the link", { timeout: 15000 });
+        expect([...cloud.shares.values()][0].pass).toBe(null);
+        await B.goto(link);
+        await B.waitForSelector("#pb.is-readonly:not([hidden])", { timeout: 30000 });
+    });
+
+    await test.step("New link retires the old one", async () => {
+        await A.locator("#share-renew").click(); // confirm() accepted
+        await expect(A.locator("#share-url")).not.toHaveValue(link, { timeout: 15000 });
+        const fresh = await A.locator("#share-url").inputValue();
+        expect(fresh).toMatch(/\/b\/[A-Za-z0-9]{10}$/);
+        await B.goto(link);
+        await expect(B.locator("#toast")).toContainText("doesn't exist any more", { timeout: 30000 });
+        await B.goto(fresh);
+        await B.waitForSelector("#pb.is-readonly:not([hidden])", { timeout: 30000 });
+        link = fresh;
+    });
+
+    await test.step("Stop sharing turns the link off", async () => {
+        await A.locator("#share-stop").click(); // confirm() accepted
+        await expect(A.locator("#share-create")).toBeVisible({ timeout: 15000 });
+        await expect(A.locator("#share-status")).toContainText("Only you can see this board");
+        expect(cloud.shares.size).toBe(0);
+        await B.goto(link);
+        await expect(B.locator("#toast")).toContainText("doesn't exist any more", { timeout: 30000 });
     });
 });

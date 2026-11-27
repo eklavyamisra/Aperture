@@ -61,7 +61,7 @@ Accounts stay switched off until these are done; the site works local-only meanw
 3. Point the old GitHub Pages site at the new URL (or delete the key from that repo).
 
 Deep links: `/?q=tokyo` (search) · `/?q=tokyo&view=canvas` (opens straight into the canvas) ·
-`/?by=<username>` (one photographer's work) · `/b/<code>` (a signed-in user's shared board, with a link preview) ·
+`/?by=<username>` (one photographer's work) · `/b/<code>` (a signed-in user's shared board, with a link preview; may ask for a password) ·
 `/#board=…` (a board packed into the link). Shared boards open read-only.
 
 ## Search
