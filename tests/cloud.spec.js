@@ -4,6 +4,7 @@
 // security: each call only sees the signed-in user's rows and files.
 import fs from "node:fs";
 import { test, expect, openGrid, openBoard, boardItems, png } from "./fixtures.js";
+import { respond as boardPage } from "../backend/api/board.js";
 
 class FakeCloud {
     constructor() {
@@ -11,6 +12,16 @@ class FakeCloud {
         this.sessions = new Map(); // browser context -> user
         this.rows = new Map(); // `${owner}|${id}` -> row
         this.blobs = new Map(); // path -> data URL
+        this.shares = new Map(); // code -> { owner, boardId }
+    }
+    // what Supabase's public shared_board(code) returns (schema.sql)
+    sharedBoard(code) {
+        const s = this.shares.get(code);
+        const r = s && this.rows.get(`${s.owner}|${s.boardId}`);
+        if (!r || r.deleted || !r.data) return null;
+        const data = JSON.parse(JSON.stringify(r.data));
+        data.pins = data.pins.filter((x) => x.kind !== "upload");
+        return { name: r.name, data, updated: r.updated };
     }
     userFor(email) {
         if (!this.users.has(email)) this.users.set(email, `user-${this.users.size + 1}`);
@@ -55,7 +66,19 @@ class FakeCloud {
             case "getBlob":
                 mine();
                 return arg.startsWith(`${me.id}/`) ? this.blobs.get(arg) || null : null;
+            case "findShare":
+                mine();
+                return [...this.shares].find(([, s]) => s.owner === me.id && s.boardId === arg)?.[0] || null;
+            case "createShare": {
+                mine();
+                if (!/^[A-Za-z0-9]{10,16}$/.test(arg.code)) throw new Error("bad code");
+                if (!this.rows.has(`${me.id}|${arg.boardId}`)) throw new Error("board isn't in the account");
+                if (this.shares.has(arg.code) || [...this.shares.values()].some((s) => s.owner === me.id && s.boardId === arg.boardId)) throw new Error("duplicate");
+                this.shares.set(arg.code, { owner: me.id, boardId: arg.boardId });
+                return null;
+            }
             case "wipe":
+                [...this.shares].filter(([, s]) => s.owner === me.id).forEach(([c]) => this.shares.delete(c));
                 mine().forEach((r) => this.rows.delete(`${me.id}|${r.id}`));
                 [...this.blobs.keys()].filter((k) => k.startsWith(`${me.id}/`)).forEach((k) => this.blobs.delete(k));
                 return null;
@@ -100,8 +123,18 @@ async function installCloud(context, cloud) {
                 const d = await call("getBlob", path);
                 return d ? (await fetch(d)).blob() : null;
             },
+            findShare: (boardId) => call("findShare", boardId),
+            createShare: (code, boardId) => call("createShare", { code, boardId }),
             wipe: () => call("wipe"),
         };
+    });
+}
+
+// /b/<code> pages come from the real page function, reading boards from the fake
+async function serveSharePages(context, cloud) {
+    await context.route("**/b/*", async (route) => {
+        const res = await boardPage(new Request(route.request().url()), async (code) => cloud.sharedBoard(code));
+        await route.fulfill({ status: res.status, headers: Object.fromEntries(res.headers), body: await res.text() });
     });
 }
 
@@ -244,4 +277,74 @@ test("cloud: a different account on the same device doesn't inherit boards", asy
     await expect(page.locator(".pb-card")).toHaveCount(0);
     expect(cloud.boards("second@example.com")).toHaveLength(0);
     expect(cloud.boards("first@example.com")).toHaveLength(1);
+});
+
+test("cloud: a signed-in board gets a short share link that stays current", async ({ page, freshPage }, info) => {
+    const cloud = new FakeCloud();
+    const A = page;
+    const B = freshPage;
+    await installCloud(A.context(), cloud);
+    await serveSharePages(B.context(), cloud);
+    const email = "lin@example.com";
+    let link;
+
+    await test.step("Share on a signed-in board copies a /b/ link", async () => {
+        await openGrid(A);
+        await A.evaluate(() => state.photos.slice(0, 3).forEach((p) => window.pins.toggle(p)));
+        await openBoard(A);
+        const file = info.outputPath("upload.png");
+        fs.writeFileSync(file, png("#c8553d", 320, 240));
+        await A.setInputFiles("#pb-file", file);
+        await A.waitForSelector(".pb-card.is-upload img[src^='blob:']", { timeout: 15000 });
+        await signIn(A, email);
+        await A.locator("#pb-share").click();
+        await expect(A.locator("#pb-share")).toContainText("Link copied", { timeout: 15000 });
+        await expect(A.locator("#toast")).toContainText("as you keep editing");
+        await expect(A.locator("#toast")).toContainText("1 uploaded image isn't included");
+        link = await A.evaluate(() => navigator.clipboard.readText());
+        expect(link).toMatch(/^http:\/\/localhost:\d+\/b\/[A-Za-z0-9]{10}$/);
+        expect(cloud.shares.size).toBe(1);
+    });
+
+    await test.step("the link opens the board read-only, without uploads", async () => {
+        await B.goto(link);
+        expect(await B.title()).toBe("My board — Aperture");
+        await B.waitForSelector("#pb.is-readonly:not([hidden])", { timeout: 30000 });
+        await expect(B.locator(".pb-card")).toHaveCount(3);
+        await expect(B.locator("#pb-shared-name")).toHaveText("My board");
+        expect(await B.evaluate(() => location.pathname)).toMatch(/^\/b\//);
+    });
+
+    await test.step("later edits reach the same link", async () => {
+        await A.locator("#pb-area").focus();
+        await A.keyboard.press("n");
+        await A.waitForTimeout(300);
+        await A.keyboard.type("Call sheet");
+        await A.keyboard.press("Escape");
+        await A.waitForTimeout(2200); // the Share label resets
+        await A.locator("#pb-share").click();
+        await expect(A.locator("#pb-share")).toContainText("Link copied", { timeout: 15000 });
+        expect(await A.evaluate(() => navigator.clipboard.readText())).toBe(link);
+        expect(cloud.shares.size).toBe(1);
+        await B.reload();
+        await B.waitForSelector("#pb.is-readonly:not([hidden])", { timeout: 30000 });
+        await expect(B.locator(".pb-card")).toHaveCount(4);
+        await expect(B.locator(".pb-card.is-note .pb-note")).toHaveValue("Call sheet");
+    });
+
+    await test.step("Save a copy keeps it and returns to the app's address", async () => {
+        await B.locator("#pb-keep").click();
+        await expect(B.locator("#pb")).not.toHaveClass(/is-readonly/);
+        expect(await B.evaluate(() => location.pathname)).toBe("/");
+        expect(await boardCount(B)).toBe(2);
+    });
+
+    await test.step("a deleted board's link says so", async () => {
+        // deleted on another device: the row becomes a tombstone
+        const [{ owner, boardId }] = cloud.shares.values();
+        cloud.rows.get(`${owner}|${boardId}`).deleted = true;
+        await B.goto(link);
+        await expect(B.locator("#toast")).toContainText("doesn't exist any more", { timeout: 30000 });
+        expect(await B.evaluate(() => location.pathname)).toBe("/");
+    });
 });

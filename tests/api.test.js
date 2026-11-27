@@ -1,9 +1,10 @@
-// Unit tests for the two serverless functions (run with `node --test`).
+// Unit tests for the serverless functions (run with `node --test`).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { GET } from "../backend/api/unsplash.js";
 import { POST } from "../backend/api/log.js";
 import { GET as config } from "../backend/api/config.js";
+import { GET as boardPage, respond as boardRespond } from "../backend/api/board.js";
 
 /* ---------- api/unsplash.js ---------- */
 
@@ -133,4 +134,102 @@ test("config: empty until Supabase is set, then only the public settings", async
     assert.deepEqual(await cfg({ SUPABASE_URL: "https://evil.example.com", SUPABASE_ANON_KEY: anon }), {});
     assert.deepEqual(await cfg({ SUPABASE_URL: "http://abcd1234.supabase.co", SUPABASE_ANON_KEY: anon }), {});
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+});
+
+/* ---------- api/board.js (short share links) ---------- */
+
+const photoPin = (n) => ({ kind: "unsplash", photo: { id: `p${n}`, urls: { raw: `https://images.unsplash.com/photo-${n}?ixid=abc` }, user: { name: "Ada" } } });
+const sample = { name: "Trip <moodboard> & \"more\"", data: { name: "x", pins: [photoPin(1), photoPin(2), { kind: "note", id: "n-1", note: "</script><script>alert(1)</script>" }, { kind: "link", id: "l-1" }] } };
+
+const tag = (html, attr) => html.match(new RegExp(`<meta ${attr} content="([^"]*)"`))?.[1];
+const embedded = (html) => JSON.parse(html.match(/<script type="application\/json" id="shared-board">([^]*?)<\/script>/)[1]);
+
+test("board page: fills the preview tags and embeds the board", async () => {
+    const asked = [];
+    const res = await boardRespond(new Request("https://aperture.example/api/board?code=AbCdEf1234"), async (code) => (asked.push(code), sample));
+    assert.deepEqual(asked, ["AbCdEf1234"]);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /text\/html/);
+    assert.equal(res.headers.get("x-robots-tag"), "noindex");
+    assert.match(res.headers.get("cdn-cache-control"), /s-maxage=60/);
+    const html = await res.text();
+    assert.match(html, /<base href="\/">/);
+    assert.match(html, /<title>Trip &lt;moodboard&gt; &amp; &quot;more&quot; — Aperture<\/title>/);
+    assert.equal(tag(html, 'property="og:title"'), "Trip &lt;moodboard&gt; &amp; &quot;more&quot;");
+    assert.equal(tag(html, 'property="og:description"'), "2 photos, 1 note and 1 link on a board in Aperture.");
+    assert.equal(tag(html, 'property="og:url"'), "https://aperture.example/b/AbCdEf1234");
+    const img = new URL(tag(html, 'property="og:image"').replace(/&amp;/g, "&"));
+    assert.equal(img.origin + img.pathname, "https://images.unsplash.com/photo-1");
+    assert.equal(img.searchParams.get("w"), "1200");
+    assert.equal(img.searchParams.get("h"), "630");
+    assert.equal(img.searchParams.get("ixid"), "abc");
+    assert.equal(tag(html, 'name="twitter:image"'), tag(html, 'property="og:image"'));
+    // nothing in the board can break out of the embedded JSON
+    assert.equal((html.match(/<\/script>/g) || []).length, (html.match(/<script/g) || []).length);
+    const board = embedded(html);
+    assert.equal(board.code, "AbCdEf1234");
+    assert.equal(board.name, sample.name);
+    assert.equal(board.data.pins.length, 4);
+    assert.equal(board.data.pins[2].note, sample.data.pins[2].note);
+});
+
+test("board page: a board without Unsplash photos uses the site image", async () => {
+    const res = await boardRespond(new Request("https://aperture.example/api/board?code=AbCdEf1234"), async () => ({ name: "Notes", data: { pins: [{ kind: "note", id: "n-1" }] } }));
+    const html = await res.text();
+    assert.equal(tag(html, 'property="og:image"'), "https://aperture.example/img/og.jpg");
+    assert.equal(tag(html, 'property="og:description"'), "1 note on a board in Aperture.");
+});
+
+test("board page: unknown, malformed and unreachable boards", async () => {
+    const missing = await boardRespond(new Request("https://aperture.example/api/board?code=AbCdEf1234"), async () => null);
+    assert.equal(missing.status, 404);
+    const mhtml = await missing.text();
+    assert.deepEqual(embedded(mhtml), { code: "AbCdEf1234", missing: true });
+    assert.equal(tag(mhtml, 'property="og:title"'), "Board not found");
+
+    let calls = 0;
+    for (const code of ["short", "has-dash123", "../../etc/passwd", "a".repeat(40), ""]) {
+        const r = await boardRespond(new Request(`https://aperture.example/api/board?code=${encodeURIComponent(code)}`), async () => (calls++, sample));
+        assert.equal(r.status, 404, code);
+    }
+    assert.equal(calls, 0);
+
+    const real = console.error;
+    console.error = () => {};
+    try {
+        const down = await boardRespond(new Request("https://aperture.example/api/board?code=AbCdEf1234"), async () => {
+            throw new Error("offline");
+        });
+        assert.equal(down.status, 502);
+        assert.equal(down.headers.get("cache-control"), "no-store");
+        assert.deepEqual(embedded(await down.text()), { code: "AbCdEf1234", error: true });
+    } finally {
+        console.error = real;
+    }
+});
+
+test("board page: looks the code up through Supabase's shared_board() with the anon key", async () => {
+    const keep = { url: process.env.SUPABASE_URL, key: process.env.SUPABASE_ANON_KEY, fetch: globalThis.fetch };
+    process.env.SUPABASE_URL = "https://abcd1234.supabase.co";
+    process.env.SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.public-anon";
+    const seen = [];
+    globalThis.fetch = async (url, init) => {
+        seen.push({ url: String(url), init });
+        return new Response(JSON.stringify([sample]), { status: 200 });
+    };
+    try {
+        const res = await boardPage(new Request("https://aperture.example/api/board?code=AbCdEf1234"));
+        assert.equal(res.status, 200);
+        assert.equal(seen.length, 1);
+        assert.equal(seen[0].url, "https://abcd1234.supabase.co/rest/v1/rpc/shared_board");
+        assert.equal(seen[0].init.method, "POST");
+        assert.equal(seen[0].init.headers.apikey, process.env.SUPABASE_ANON_KEY);
+        assert.deepEqual(JSON.parse(seen[0].init.body), { share_code: "AbCdEf1234" });
+    } finally {
+        globalThis.fetch = keep.fetch;
+        for (const [k, v] of [["SUPABASE_URL", keep.url], ["SUPABASE_ANON_KEY", keep.key]]) {
+            if (v === undefined) delete process.env[k];
+            else process.env[k] = v;
+        }
+    }
 });

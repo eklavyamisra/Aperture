@@ -49,6 +49,8 @@ Accounts stay switched off until these are done; the site works local-only meanw
    npx vercel env add SUPABASE_ANON_KEY production
    ```
    and redeploy. Locally, add the same two lines to `.env.local`. Never use the `service_role` key here.
+7. When `schema.sql` changes (for example the `shares` table and `shared_board()` for short share links),
+   paste and run it again. It's safe to re-run.
 
 ## After the first deploy
 
@@ -59,7 +61,8 @@ Accounts stay switched off until these are done; the site works local-only meanw
 3. Point the old GitHub Pages site at the new URL (or delete the key from that repo).
 
 Deep links: `/?q=tokyo` (search) · `/?q=tokyo&view=canvas` (opens straight into the canvas) ·
-`/?by=<username>` (one photographer's work) · `/#board=…` (a shared pin board, opened read-only).
+`/?by=<username>` (one photographer's work) · `/b/<code>` (a signed-in user's shared board, with a link preview) ·
+`/#board=…` (a board packed into the link). Shared boards open read-only.
 
 ## Search
 

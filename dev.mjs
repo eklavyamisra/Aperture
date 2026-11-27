@@ -9,6 +9,7 @@ import { extname, join, normalize } from "node:path";
 import { GET } from "./backend/api/unsplash.js";
 import { POST as logPOST } from "./backend/api/log.js";
 import { GET as configGET } from "./backend/api/config.js";
+import { GET as boardGET } from "./backend/api/board.js";
 
 const root = new URL("./frontend/", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
 const PORT = +process.env.PORT || 5173;
@@ -34,13 +35,35 @@ const TYPES = {
 
 const cache = new Map();
 
-// the same exact-path rewrites and redirects Vercel applies (vercel.json)
+// the same rewrites and redirects Vercel applies (vercel.json). Sources are exact
+// paths or use ":name" segments, e.g. /b/:code -> /api/board?code=:code
 const vercel = JSON.parse(readFileSync(new URL("./vercel.json", import.meta.url), "utf8"));
-const rewrites = new Map((vercel.rewrites || []).map((r) => [r.source, r.destination]));
 const redirects = new Map((vercel.redirects || []).map((r) => [r.source, r.destination]));
+const rewrites = (vercel.rewrites || []).map((r) => {
+    const names = [];
+    const re = new RegExp("^" + r.source.replace(/:(\w+)/g, (_, n) => (names.push(n), "([^/]+)")) + "$");
+    return { re, names, destination: r.destination };
+});
+function rewrite(url) {
+    for (const r of rewrites) {
+        const m = url.pathname.match(r.re);
+        if (!m) continue;
+        let dest = r.destination;
+        r.names.forEach((n, i) => (dest = dest.replaceAll(`:${n}`, m[i + 1])));
+        const out = new URL(dest, url);
+        url.searchParams.forEach((v, k) => out.searchParams.has(k) || out.searchParams.set(k, v));
+        return out;
+    }
+    return url;
+}
 
 createServer(async (req, res) => {
-    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const original = new URL(req.url, `http://localhost:${PORT}`);
+    if (redirects.has(original.pathname)) {
+        res.writeHead(308, { location: redirects.get(original.pathname) });
+        return res.end();
+    }
+    const url = rewrite(original);
 
     if (url.pathname === "/api/log" && req.method === "POST") {
         const chunks = [];
@@ -52,6 +75,12 @@ createServer(async (req, res) => {
 
     if (url.pathname === "/api/config") {
         const r = await configGET(new Request(url));
+        res.writeHead(r.status, Object.fromEntries(r.headers));
+        return res.end(await r.text());
+    }
+
+    if (url.pathname === "/api/board") {
+        const r = await boardGET(new Request(url));
         res.writeHead(r.status, Object.fromEntries(r.headers));
         return res.end(await r.text());
     }
@@ -70,12 +99,7 @@ createServer(async (req, res) => {
         return res.end(body);
     }
 
-    if (redirects.has(url.pathname)) {
-        res.writeHead(308, { location: redirects.get(url.pathname) });
-        return res.end();
-    }
-    const pathname = rewrites.get(url.pathname) || url.pathname;
-    let p = normalize(decodeURIComponent(pathname)).replace(/^[\\/]+/, "");
+    let p = normalize(decodeURIComponent(url.pathname)).replace(/^[\\/]+/, "");
     if (!p || p.endsWith("/") || p.endsWith("\\")) p += "index.html";
     if (!extname(p)) p += ".html";
     const file = join(root, p);

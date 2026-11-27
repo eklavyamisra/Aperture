@@ -1,7 +1,7 @@
 # Aperture architecture
 
 Aperture is split into a **frontend** (`frontend/`, a static site with no build step or framework) and a
-**backend** (`backend/`: three small serverless functions plus a Supabase database for accounts),
+**backend** (`backend/`: four small serverless functions plus a Supabase database for accounts),
 hosted on Vercel. Boards are offline-first: the browser copy is the one being edited, and when someone
 signs in it is mirrored to Supabase so their devices stay in step. Without an account, or when
 Supabase isn't configured, everything stays on the device.
@@ -25,11 +25,12 @@ flowchart LR
         PROXY[backend/api/unsplash.js]
         LOG[backend/api/log.js]
         CFG[backend/api/config.js]
+        BOARD[backend/api/board.js<br/>/b/code pages]
         LOGS[(Function logs)]
     end
     subgraph Supabase
         AUTH[Auth<br/>email link, Google]
-        DB[(Postgres<br/>boards table)]
+        DB[(Postgres<br/>boards, shares)]
         BUCKET[(Storage<br/>uploads bucket)]
     end
     UNS[api.unsplash.com]
@@ -48,6 +49,7 @@ flowchart LR
     CLOUD --> AUTH
     CLOUD <-->|row-level security| DB
     CLOUD <-->|own folder only| BUCKET
+    BOARD -->|shared_board code| DB
 ```
 
 ## Repository layout
@@ -73,14 +75,16 @@ backend/
     unsplash.js      GET proxy: holds the key, allow-lists endpoints and params, sets CDN cache headers
     log.js           POST endpoint: allow-lists and trims error reports, writes them to the logs
     config.js        GET: the public Supabase URL and anon key, or {} when accounts aren't set up
+    board.js         GET /b/<code>: index.html with the board's link-preview tags and the board embedded
   supabase/
-    schema.sql       boards table, uploads bucket, row-level security (run once in Supabase)
+    schema.sql       boards and shares tables, uploads bucket, row-level security, shared_board()
+                     (run in Supabase; re-run after it changes)
 api/                 Vercel entry points only: Vercel looks for functions in /api, so each file
                      re-exports the real one from backend/api/ in one line
 dev.mjs              local server: serves frontend/, runs the backend functions, applies vercel.json's
                      rewrites/redirects, caches proxy responses in memory
 tests/               node:test unit tests + Playwright browser tests (Unsplash mocked)
-vercel.json          output dir, clean URLs, rewrites (/privacy, /terms), redirects for old
+vercel.json          output dir, clean URLs, rewrites (/privacy, /terms, /b/:code), redirects for old
                      asset URLs, cache + security headers
 index.html (root)    redirect from the old GitHub Pages URL
 ```
@@ -147,22 +151,34 @@ above that layer so strings end under the pin.
 
 ## Sharing and export
 
-- **Share link:** the board is packed (format v2; v1 still opens), deflate-raw compressed and
-  base64url-encoded into `#board=…`. Nothing is uploaded. Uploads are left out (too big for a URL).
-  Recipients get a read-only copy and can save it.
+- **Short share link (signed in, #18):** Share syncs the board, then makes (once per board) a row in
+  the `shares` table with a random 10-character code, and copies `/b/<code>`. The link points at the
+  board, not a snapshot, so it shows the latest synced copy. `backend/api/board.js` answers `/b/<code>`:
+  it looks the board up through the public `shared_board(code)` function, which strips uploads, then
+  serves `index.html` with the board's name, a description ("3 photos and 1 note…") and the first
+  Unsplash photo (cropped 1200×630) in the title and `og:` tags, so chat apps show a real preview. It
+  adds `<base href="/">` (the page lives under `/b/`) and embeds the board as JSON in
+  `#shared-board`, which `pins.js` passes through `cleanBoard` and opens read-only. Cached at the
+  edge for 60 s; unknown codes get a 404 page that says the board is gone. Deleting the board (or
+  the account's data) removes its share.
+- **Hash share link (signed out, or the account can't be reached):** the board is packed (format v2;
+  v1 still opens), deflate-raw compressed and base64url-encoded into `#board=…`. Nothing is uploaded.
+- Both: uploads are left out, and recipients get a read-only copy they can save.
 - **Board file (JSON, v4):** includes uploads as data URLs; importing merges and restores the blobs.
 - **PNG:** drawn on a 2D canvas, then each Unsplash photo is reported to `/photos/<id>/download`,
   as the API guidelines ask.
 
 ## Accounts and sync
 
-Supabase holds three things, all locked to their owner by row-level security
+Supabase holds these, all locked to their owner by row-level security
 (`backend/supabase/schema.sql`):
 
 - **Auth:** email magic link and Google. The session lives in localStorage (`aperture:auth`), not a cookie.
 - **`boards` table:** one row per board per person: `owner`, `id`, `name`, `data` (the whole board as
   JSON), `updated` (the browser's last-edit time), `deleted` (tombstone).
 - **`uploads` bucket:** private; each person's images live under `<user id>/<item id>`.
+- **`shares` table:** `code`, `owner`, `board_id` (one per board). Nobody can list it; the only public
+  read is `shared_board(code)`, a security-definer function that returns one live board minus uploads.
 
 `cloud.js` syncs on sign-in, 1.5 s after a local change, when the tab becomes visible or comes back
 online, and every 45 s while visible. Each sync:
@@ -190,6 +206,10 @@ All backend code is in `backend/api/`. The files in the root `api/` folder only 
 - **`log.js`**: rejects bodies over 6,000 chars or bad JSON. Keeps only kind, message, stack,
   path, view and build, trimmed, and logs them with the prefix `[client-error]`. No IP, user agent
   or query strings.
+- **`board.js`**: `/b/<code>` (rewritten to `/api/board?code=`). Codes must be 10–16 letters or
+  digits or the database isn't asked. Reads `frontend/index.html` from disk (`includeFiles` in
+  vercel.json), falling back to fetching `/`. Everything put into the HTML is escaped, and `<` in the
+  embedded JSON is written as `\u003c`. A failed lookup is a 502 page that isn't cached. `noindex`.
 - **`config.js`**: returns `{ supabase: { url, anonKey } }` only when both env vars are set and the URL
   is a Supabase project URL; otherwise `{}`, which keeps accounts switched off. The anon key is public by
   design; the service-role key is never used by the app.
@@ -203,6 +223,8 @@ All backend code is in `backend/api/`. The files in the root `api/` folder only 
   serves generated PNGs for `images.unsplash.com`, so no key is needed and the rate limit is never
   touched. `tests/fixtures.js` records `sendBeacon` calls, fails a test on any uncaught page error,
   and marks the walkthrough as seen (`tour.spec.js` turns it back on).
+- `tests/cloud.spec.js` also covers short share links: `/b/` pages come from the real `board.js`
+  (via its `respond(request, find)` export) reading the fake's boards.
 - `tests/cloud.spec.js`: accounts and sync against an in-memory Supabase stand-in in the test process
   (`window.__apertureBackend`), with ownership enforced like row-level security. Two browser profiles
   act as two devices. Other tests get `{}` from `/api/config`, so they stay local-only.

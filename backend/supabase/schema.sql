@@ -1,4 +1,4 @@
--- Aperture: accounts, synced boards and uploaded images (roadmap #15–17).
+-- Aperture: accounts, synced boards, uploaded images (roadmap #15–17) and share links (#18).
 -- Run once in the Supabase dashboard: SQL Editor → New query → paste → Run.
 -- Safe to re-run.
 
@@ -67,3 +67,49 @@ create policy "uploads: owner updates" on storage.objects for update
     using (bucket_id = 'uploads' and (storage.foldername(name))[1] = auth.uid()::text);
 create policy "uploads: owner deletes" on storage.objects for delete
     using (bucket_id = 'uploads' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- ---------- share links (#18) ----------
+-- A share is a short code pointing at one of the owner's boards, so the link
+-- (/b/<code>) always shows the board as it is now. Deleting the board, or the
+-- account's data, removes its share too. Nobody can list shares: a visitor can
+-- only look one up by its code through shared_board() below.
+create table if not exists public.shares (
+    code       text not null primary key check (code ~ '^[A-Za-z0-9]{10,16}$'),
+    owner      uuid not null default auth.uid() references auth.users (id) on delete cascade,
+    board_id   text not null,
+    created_at timestamptz not null default now(),
+    unique (owner, board_id),
+    foreign key (owner, board_id) references public.boards (owner, id) on delete cascade
+);
+
+alter table public.shares enable row level security;
+revoke all on public.shares from anon;
+grant select, insert, delete on public.shares to authenticated;
+
+drop policy if exists "shares: owner reads"   on public.shares;
+drop policy if exists "shares: owner inserts" on public.shares;
+drop policy if exists "shares: owner deletes" on public.shares;
+
+create policy "shares: owner reads"   on public.shares for select using (owner = auth.uid());
+create policy "shares: owner inserts" on public.shares for insert with check (owner = auth.uid());
+create policy "shares: owner deletes" on public.shares for delete using (owner = auth.uid());
+
+-- The one public read: a board by its share code. Uploaded images live in each
+-- owner's private bucket, so their cards are left out here.
+create or replace function public.shared_board(share_code text)
+returns table (name text, data jsonb, updated bigint)
+language sql stable security definer set search_path = public as $$
+    select b.name,
+           jsonb_set(b.data, '{pins}', coalesce(
+               (select jsonb_agg(p)
+                from jsonb_array_elements(case when jsonb_typeof(b.data -> 'pins') = 'array' then b.data -> 'pins' else '[]'::jsonb end) p
+                where p ->> 'kind' is distinct from 'upload'),
+               '[]'::jsonb)),
+           b.updated
+    from public.shares s
+    join public.boards b on b.owner = s.owner and b.id = s.board_id
+    where s.code = share_code and not b.deleted and jsonb_typeof(b.data) = 'object'
+$$;
+
+revoke all on function public.shared_board(text) from public;
+grant execute on function public.shared_board(text) to anon, authenticated;

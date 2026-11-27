@@ -4,7 +4,8 @@
    this mirrors it to Supabase. Each board carries its last-edit time and
    the newer copy wins. Deletes leave a tombstone so other devices drop the
    board too. Uploaded images go to a private storage bucket under the
-   user's id.
+   user's id. A board can also get a short share link (/b/<code>, #18)
+   that always shows its latest synced copy.
 
    Off unless /api/config returns Supabase settings: then the account
    button stays hidden and nothing here runs. Tests swap in their own
@@ -36,7 +37,7 @@
     let backend = null;
     let user = null; // { id, email }
     let state = "off"; // off | out | syncing | synced | offline | error
-    let busy = false;
+    let running = null; // the sync in progress
     let lastError = ""; // shown in the account panel so a failed sync says why
     let again = false;
     let pushT = 0;
@@ -97,6 +98,13 @@
                 const { data, error } = await sb.storage.from("uploads").download(path);
                 return error ? null : data;
             },
+            async findShare(boardId) {
+                const rows = must(await sb.from("shares").select("code").eq("board_id", boardId).limit(1));
+                return rows[0]?.code || null;
+            },
+            async createShare(code, boardId) {
+                must(await sb.from("shares").insert({ code, board_id: boardId, owner: user.id }));
+            },
             async wipe() {
                 must(await sb.from("boards").delete().eq("owner", user.id));
                 const files = must(await sb.storage.from("uploads").list(user.id, { limit: 1000 }));
@@ -135,10 +143,24 @@
         write(SENT, [...sent]);
     }
 
-    async function sync() {
-        if (!user || !backend || !window.pins?.local) return;
-        if (busy) return void (again = true);
-        busy = true;
+    // resolves once this device and the account agree (including a re-run asked for meanwhile)
+    function sync() {
+        if (!user || !backend || !window.pins?.local) return Promise.resolve();
+        if (running) {
+            again = true;
+            return running;
+        }
+        running = run().finally(() => {
+            running = null;
+            if (again) {
+                again = false;
+                return sync();
+            }
+        });
+        return running;
+    }
+
+    async function run() {
         setState("syncing");
         const L = window.pins.local;
         try {
@@ -197,12 +219,6 @@
             lastError = String(err?.message || err || "").slice(0, 160);
             setState(navigator.onLine === false ? "offline" : "error");
             window.reportProblem?.("cloud sync failed", err);
-        } finally {
-            busy = false;
-            if (again) {
-                again = false;
-                sync();
-            }
         }
     }
 
@@ -225,6 +241,39 @@
     function poll() {
         clearInterval(pollT);
         pollT = setInterval(() => user && !document.hidden && sync(), POLL);
+    }
+
+    /* ---------- short share links (#18) ---------- */
+
+    const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    function newCode(n = 10) {
+        let out = "";
+        while (out.length < n) {
+            for (const b of crypto.getRandomValues(new Uint8Array(n * 2))) {
+                if (b < 248 && out.length < n) out += ALPHABET[b % 62]; // 248 = 4 × 62, keeps it uniform
+            }
+        }
+        return out;
+    }
+
+    // "/b/<code>" for this board, made on first use. The board is synced first, so
+    // the link shows what's on screen. null when signed out (pins.js falls back to
+    // a #board= link); throws if the account can't be reached.
+    async function shareLink(boardId) {
+        if (!user || !backend?.createShare) return null;
+        await sync();
+        if (state !== "synced") throw new Error(lastError || "couldn't sync the board");
+        let code = await backend.findShare(boardId);
+        if (!code) {
+            try {
+                await backend.createShare(newCode(), boardId);
+            } catch (err) {
+                // made meanwhile (a second click, another device): use that one
+                if (!(await backend.findShare(boardId))) throw err;
+            }
+            code = await backend.findShare(boardId);
+        }
+        return `${location.origin}/b/${code}`;
     }
 
     /* ---------- sign in / out ---------- */
@@ -415,6 +464,6 @@
         if (u) signedIn(u);
     }
 
-    window.cloud = { sync, state: () => state, user: () => user, open, close };
+    window.cloud = { sync, shareLink, state: () => state, user: () => user, open, close };
     start();
 })();

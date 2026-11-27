@@ -3132,8 +3132,10 @@
     });
 
     /* ---------- share as a link ---------- */
-    // the board is compressed into the URL fragment, so nothing is uploaded
-    // anywhere. Uploaded images can't fit in a link and are left out.
+    // Signed in: a short /b/<code> link to the synced board (cloud.js, #18), which
+    // stays current and gets a real link preview. Otherwise the board is
+    // compressed into the URL fragment, so nothing is uploaded anywhere.
+    // Either way uploaded images are left out.
     const b64u = (bytes) => {
         let s = "";
         for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
@@ -3242,29 +3244,70 @@
         );
     }
 
+    // the link as a promise that never rejects: { url, short, failed }
+    async function makeLink(packed) {
+        let failed = false;
+        if (window.cloud?.user?.()) {
+            try {
+                const url = await window.cloud.shareLink(index.active);
+                if (url) return { url, short: true };
+            } catch (err) {
+                failed = true;
+                window.reportProblem?.("short share link failed", err);
+            }
+        }
+        return { url: `${location.origin}/#board=${await pack(packed)}`, short: false, failed };
+    }
+
+    // Safari only allows a clipboard write during the click itself, so the text is
+    // handed over as a promise straight away and filled in when the link is ready.
+    async function copyLater(text) {
+        try {
+            if (window.ClipboardItem && navigator.clipboard?.write) {
+                await navigator.clipboard.write([new ClipboardItem({ "text/plain": text.then((t) => new Blob([t], { type: "text/plain" })) })]);
+                return true;
+            }
+        } catch (e) {}
+        try {
+            await navigator.clipboard.writeText(await text);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    let sharing = false;
     shareBtn.addEventListener("click", async () => {
         if (!B.pins.length) return toast("Add something first — an empty board has nothing to share");
+        if (sharing) return;
         const label = shareBtn.firstChild;
         try {
             const packed = packBoard();
             if (!packed.i.length) return toast("Uploaded images can't go in a share link. Export the board file instead.", "warn");
-            const url = `${location.origin}${location.pathname}#board=${await pack(packed)}`;
-            let copied = false;
-            try {
-                await navigator.clipboard.writeText(url);
-                copied = true;
-            } catch (e) {}
+            sharing = true;
+            const made = makeLink(packed).catch(() => ({ url: "", short: false, failed: true }));
+            if (window.cloud?.user?.()) label.textContent = "Linking…";
+            const copiedP = copyLater(made.then((r) => r.url));
+            const { url, short, failed } = await made;
+            if (!url) throw new Error("no link");
+            const copied = await copiedP;
             if (!copied) window.prompt("Copy this link to share the board:", url);
             const kb = Math.round(url.length / 1024);
             label.textContent = copied ? "Link copied ✓" : "Share";
             const notes = [];
+            if (short) notes.push("it shows the board as you keep editing it");
+            if (failed) notes.push("your account couldn't be reached, so it carries the whole board");
             if (packed.skipped) notes.push(`${packed.skipped} uploaded image${packed.skipped === 1 ? " isn't" : "s aren't"} included`);
-            if (kb > 6) notes.push(`it's long (${kb} KB), so some chat apps may cut it`);
-            if (copied) toast(`Share link copied${notes.length ? ` — ${notes.join("; ")}` : ""}`, notes.length ? "warn" : "");
+            if (!short && kb > 6) notes.push(`it's long (${kb} KB), so some chat apps may cut it${window.cloud?.state?.() === "out" ? ". Sign in for a short link" : ""}`);
+            const warn = failed || packed.skipped || (!short && kb > 6);
+            if (copied) toast(`Share link copied${notes.length ? ` — ${notes.join("; ")}` : ""}`, warn ? "warn" : "");
             setTimeout(() => (label.textContent = "Share"), 2200);
         } catch (err) {
+            label.textContent = "Share";
             window.reportProblem?.("share failed", err);
             toast("Couldn't make a share link in this browser", "warn");
+        } finally {
+            sharing = false;
         }
     });
 
@@ -3280,7 +3323,16 @@
         render();
     }
 
+    // a /b/<code> page: back to the plain app address once the shared board is closed
+    function leavePath() {
+        if (!location.pathname.startsWith("/b/")) return;
+        try {
+            history.replaceState(null, "", "/" + location.search);
+        } catch (e) {}
+    }
+
     function leaveShared() {
+        leavePath();
         readonly = false;
         board.classList.remove("is-readonly");
         sharedBar.hidden = true;
@@ -3297,6 +3349,7 @@
         if (index.list.some((b) => b.name === name)) name = `${name} (shared)`;
         copy.name = name.slice(0, 60);
         readonly = false;
+        leavePath();
         board.classList.remove("is-readonly");
         sharedBar.hidden = true;
         store.set(bkey(id), copy);
@@ -3320,6 +3373,26 @@
             window.reportProblem?.("broken share link", err);
             return toast("That shared board link is broken or incomplete", "warn");
         }
+        showShared(data);
+    }
+
+    // /b/<code>: the server embedded the board in the page (backend/api/board.js)
+    function openSharedFromPage() {
+        const el = document.getElementById("shared-board");
+        if (!el) return;
+        el.remove();
+        let s = null;
+        try {
+            s = JSON.parse(el.textContent);
+        } catch (e) {}
+        if (!s?.data || typeof s.data !== "object") {
+            leavePath();
+            return toast(s?.error ? "Couldn't load that shared board. Try the link again in a moment." : "That shared board doesn't exist any more. Its owner may have deleted it.", "warn");
+        }
+        showShared(cleanBoard({ ...s.data, name: s.name }, "Shared board"));
+    }
+
+    function showShared(data) {
         // wait for the first page so the canvas (which hosts the board) can open
         const t0 = Date.now();
         const wait = setInterval(() => {
@@ -3338,6 +3411,7 @@
             );
         }, 100);
     }
+    openSharedFromPage();
     openSharedFromHash();
     window.addEventListener("hashchange", openSharedFromHash);
 

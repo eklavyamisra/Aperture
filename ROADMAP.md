@@ -1,6 +1,6 @@
 # Aperture roadmap
 
-Four phases (0–3) plus a track that runs alongside all of them. Status as of 26 November 2026.
+Four phases (0–3) plus a track that runs alongside all of them. Status as of 27 November 2026.
 
 **Legend:** ✅ done · 🟡 partly done · ⏸ waiting on a decision · ⬜ not started
 
@@ -8,7 +8,7 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 |---|---|---|
 | 0 | Fix before more users arrive | ✅ 4 of 5 (approval left until needed) |
 | 1 | Make the board useful without Unsplash | ✅ 9 of 9 |
-| 2 | Accounts and the cloud (paid tier starts here) | 🟡 3 of 6 built (Supabase); needs your Supabase project to go live |
+| 2 | Accounts and the cloud (paid tier starts here) | 🟡 4 of 6 (Supabase) |
 | 3 | Teams and money | ⬜ |
 | Alongside | Growth and quality | 🟡 3 of 5 |
 
@@ -38,14 +38,16 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 
 ## Phase 2: Accounts and the cloud
 
-**Backend chosen: Supabase.** Sign-in by email magic link and Google. Boards already on a device move into the account on first sign-in. Setup steps: README → *Accounts (Supabase)*.
+**Backend chosen: Supabase.** Sign-in by email magic link and Google. Boards already on a device move into the account on first sign-in. Live since 27 November 2026 (project `kumohsngovsawzukrnuw`). Setup steps: README → *Accounts (Supabase)*.
+
+**Before real traffic:** custom SMTP for sign-in emails (Supabase's built-in mailer sends only a few an hour), and **Publish app** in Google Auth Platform (until then only listed test users can use Google sign-in).
 
 | # | Item | Size | Status |
 |---|---|---|---|
-| 15 | Accounts (email magic link or Google) | M | ✅ built; live once Supabase is set up |
-| 16 | Cloud sync of boards across devices | L | ✅ built (newest edit wins per board; offline-first) |
-| 17 | Image storage for uploads | M | ✅ built (private bucket per user) |
-| 18 | Shared boards with real link previews (short URLs) | M | ⬜ |
+| 15 | Accounts (email magic link or Google) | M | ✅ live |
+| 16 | Cloud sync of boards across devices | L | ✅ live (newest edit wins per board; offline-first) |
+| 17 | Image storage for uploads | M | ✅ live (private bucket per user) |
+| 18 | Shared boards with real link previews (short URLs) | M | ✅ built; live once the updated `schema.sql` is run (`/b/<code>`, signed-in only; the link always shows the latest synced board; uploads left out) |
 | 19 | Private and password-protected share links | S | ⬜ |
 | 20 | Comments on shared boards | M | ⬜ |
 
@@ -78,6 +80,8 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 
 ## Suggested next steps
 
-1. Create the Supabase project and Google sign-in (README), so #15–17 go live. Follow-ups: full account deletion from inside the app (needs a server key), and live updates instead of the 45 s sync check.
+1. #19 private and password-protected links (builds on #18's `shares` table; also add "stop sharing"), then #20 comments.
+   Follow-ups to #15–18: full account deletion from inside the app (needs a server key), live updates instead of the 45 s sync check,
+   and showing uploaded images on shared boards (signed URLs from the private bucket).
 2. #27 landing page and waitlist (can share the same backend for storing emails).
 3. #22 presentation mode and #23 PDF export are client-only and can be done any time.
