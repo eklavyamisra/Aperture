@@ -31,18 +31,24 @@
 
     <!-- ============ PRELOADER ============ -->
     <div id="loader" aria-hidden="true">
+        <!-- seen through the iris: the first frame, developing -->
+        <div class="loader-lens"><img id="loader-frame" alt=""></div>
+        <svg class="loader-iris" viewBox="-100 -100 200 200" preserveAspectRatio="xMidYMid meet">
+            <path id="iris-blades" class="iris-blades" fill-rule="evenodd"/>
+            <g id="iris-ring" class="iris-ring">
+                <path id="iris-seams" class="iris-seams"/>
+                <circle class="iris-rim" r="60"/>
+                <g id="iris-ticks"></g>
+            </g>
+        </svg>
         <div class="loader-row mono">
             <span>APERTURE®</span>
-            <span>DEVELOPING NEGATIVES</span>
-        </div>
-        <div class="loader-count">
-            <span id="loader-num">0</span>
-        </div>
-        <div class="loader-row mono">
-            <span>ƒ/1.4 — 1/250s — ISO 200</span>
             <span id="loader-status">CONNECTING</span>
         </div>
-        <div class="loader-bar"><i id="loader-bar"></i></div>
+        <div class="loader-row loader-row--foot">
+            <span class="loader-fstop"><em>ƒ/</em><span id="loader-fstop">22</span></span>
+            <span class="mono loader-exif">1/250s — ISO 200<br>Developing negatives</span>
+        </div>
     </div>
 
     <!-- ============ CHROME ============ -->

@@ -112,47 +112,120 @@ em {
 /* ==========================================================
    Preloader
 ========================================================== */
+/* The loader has no background of its own: the iris blades are one huge
+   SVG path with a hexagonal hole, so opening the iris reveals the page. */
 #loader {
     position: fixed;
     inset: 0;
     z-index: 100;
-    background: var(--paper);
-    color: var(--bg);
+    color: var(--ink);
     display: flex;
     flex-direction: column;
     justify-content: space-between;
     padding: var(--gutter);
+    pointer-events: auto;
+}
+
+.loader-lens {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 45%, #2a2621 0%, var(--bg) 60%);
+}
+
+.loader-lens img {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: min(70vmin, 520px);
+    height: min(70vmin, 520px);
+    object-fit: cover;
+    transform: translate(-50%, -50%) scale(1.15);
+    opacity: 0;
+    filter: blur(14px) grayscale(1) contrast(1.4);
+    transition: opacity 0.9s var(--ease-out), filter 1.6s var(--ease-out), transform 2.4s var(--ease-out);
+}
+
+.loader-lens img.is-developed {
+    opacity: 1;
+    filter: none;
+    transform: translate(-50%, -50%) scale(1);
+}
+
+.loader-iris {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.iris-blades {
+    fill: var(--bg);
+}
+
+.iris-seams {
+    fill: none;
+    stroke: rgba(236, 231, 220, 0.22);
+    stroke-width: 0.35;
+}
+
+.iris-rim {
+    fill: none;
+    stroke: rgba(236, 231, 220, 0.3);
+    stroke-width: 0.35;
+}
+
+#iris-ticks line {
+    stroke: rgba(236, 231, 220, 0.18);
+    stroke-width: 0.6;
+    transition: stroke 0.25s;
+}
+
+#iris-ticks line.on {
+    stroke: var(--accent);
 }
 
 .loader-row {
+    position: relative;
     display: flex;
     justify-content: space-between;
+    align-items: flex-end;
     gap: 16px;
 }
 
-.loader-count {
+.loader-fstop {
     font-family: var(--serif);
-    font-size: clamp(120px, 28vw, 420px);
+    font-size: clamp(56px, 11vw, 150px);
     line-height: 0.8;
-    letter-spacing: -0.04em;
+    letter-spacing: -0.03em;
     font-variant-numeric: tabular-nums;
-    align-self: flex-end;
 }
 
-.loader-bar {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 3px;
+.loader-fstop {
+    display: inline-flex;
+    align-items: baseline;
 }
 
-.loader-bar i {
-    display: block;
-    height: 100%;
-    background: var(--accent);
-    transform: scaleX(0);
-    transform-origin: left;
+/* the italic ƒ and slash lean right into the digits: give them room */
+.loader-fstop em {
+    color: var(--muted);
+    letter-spacing: 0.02em;
+    padding-left: 0.12em;
+    margin-right: 0.22em;
+}
+
+.loader-exif {
+    text-align: right;
+    color: var(--muted);
+    line-height: 1.7;
+}
+
+#loader-status {
+    color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .loader-lens img { transition: none; }
 }
 
 /* ==========================================================

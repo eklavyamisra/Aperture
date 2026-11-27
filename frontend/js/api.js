@@ -1046,6 +1046,66 @@ q("#footer-top").addEventListener("click", toTop);
 /* ----------------------------------------------------------
    Boot: loader → intro
 ---------------------------------------------------------- */
+/* Camera iris: six blades around a hexagonal opening of radius `r`,
+   turned by `turn` degrees. Progress is shown by the tick ring. */
+const iris = (() => {
+    const R = 60;
+    const TICKS = 60;
+    const blades = q("#iris-blades");
+    const seams = q("#iris-seams");
+    const ring = q("#iris-ring");
+    const tickWrap = q("#iris-ticks");
+    const NS = "http://www.w3.org/2000/svg";
+    const ticks = [];
+    for (let i = 0; i < TICKS; i++) {
+        const a = (i / TICKS) * Math.PI * 2 - Math.PI / 2;
+        const len = i % 5 === 0 ? 6 : 3.5;
+        const l = document.createElementNS(NS, "line");
+        l.setAttribute("x1", (Math.cos(a) * (R + 4)).toFixed(2));
+        l.setAttribute("y1", (Math.sin(a) * (R + 4)).toFixed(2));
+        l.setAttribute("x2", (Math.cos(a) * (R + 4 + len)).toFixed(2));
+        l.setAttribute("y2", (Math.sin(a) * (R + 4 + len)).toFixed(2));
+        tickWrap.appendChild(l);
+        ticks.push(l);
+    }
+    const s = { r: 2, turn: 0, p: 0 };
+    const draw = () => {
+        const pts = [];
+        for (let i = 0; i < 6; i++) {
+            const a = ((s.turn + i * 60) * Math.PI) / 180;
+            pts.push([Math.cos(a) * s.r, Math.sin(a) * s.r]);
+        }
+        const hole = "M" + pts.map((p) => p[0].toFixed(2) + " " + p[1].toFixed(2)).join("L") + "Z";
+        blades.setAttribute("d", "M-5000-5000H5000V5000H-5000Z" + hole);
+        // each hexagon edge runs on past its corner to the rim: the blade seams
+        let d = "";
+        if (s.r < R) {
+            pts.forEach((v, i) => {
+                const w = pts[(i + 1) % 6];
+                const dx = w[0] - v[0], dy = w[1] - v[1];
+                const n = Math.hypot(dx, dy) || 1;
+                const ux = dx / n, uy = dy / n;
+                const b = v[0] * ux + v[1] * uy;
+                const t = -b + Math.sqrt(Math.max(0, b * b - (v[0] ** 2 + v[1] ** 2) + R * R));
+                d += `M${v[0].toFixed(2)} ${v[1].toFixed(2)}L${(v[0] + ux * t).toFixed(2)} ${(v[1] + uy * t).toFixed(2)}`;
+            });
+        }
+        seams.setAttribute("d", d);
+        ring.style.opacity = Math.max(0, Math.min(1, 1 - (s.r - R * 0.8) / (R * 0.4)));
+        const on = Math.round(s.p * TICKS);
+        ticks.forEach((l, i) => l.classList.toggle("on", i < on));
+    };
+    // loading progress 0..1 opens the iris part way
+    const progress = (p) => {
+        s.p = p;
+        s.r = 2 + p * R * 0.62;
+        s.turn = p * 75;
+        draw();
+    };
+    draw();
+    return { s, draw, progress };
+})();
+
 function intro() {
     document.body.classList.remove("is-loading");
     lenis?.start();
@@ -1058,7 +1118,9 @@ function intro() {
     }
 
     const tl = gsap.timeline({ defaults: { ease: "expo.out" } });
-    tl.to("#loader", { yPercent: -100, duration: 1.1, ease: "expo.inOut" })
+    tl.to("#loader .loader-row", { opacity: 0, y: -10, duration: 0.45, ease: "power2.in", stagger: 0.05 })
+        .to(iris.s, { r: 420, turn: "+=60", duration: 1.3, ease: "expo.inOut", onUpdate: iris.draw }, 0.1)
+        .to("#loader .loader-lens", { opacity: 0, duration: 0.7, ease: "power2.inOut" }, 0.45)
         .set("#loader", { display: "none" })
         .from(".hero-title .line > span", { yPercent: 110, duration: 1.3, stagger: 0.09 }, "-=0.45")
         .to(".float", { clipPath: "inset(0% 0 0 0)", duration: 1.4, stagger: 0.08, ease: "expo.inOut" }, "<0.1")
@@ -1068,14 +1130,14 @@ function intro() {
 }
 
 async function boot() {
-    const num = q("#loader-num");
-    const bar = q("#loader-bar");
+    const fstop = q("#loader-fstop");
     const status = q("#loader-status");
+    const STOPS = ["22", "16", "11", "8", "5.6", "4", "2.8", "2", "1.4"];
     const prog = { v: 0 };
     const render = () => {
-        const v = Math.round(prog.v);
-        num.textContent = v;
-        gsap.set(bar, { scaleX: v / 100 });
+        const p = prog.v / 100;
+        iris.progress(p);
+        fstop.textContent = STOPS[Math.min(STOPS.length - 1, Math.floor(p * STOPS.length))];
     };
     const crawl = gsap.to(prog, { v: 78, duration: 2.4, ease: "power2.out", onUpdate: render });
 
@@ -1109,6 +1171,12 @@ async function boot() {
     try {
         await loadPage();
         status.textContent = "DEVELOPING";
+        const first = state.photos[0];
+        if (first) {
+            const frame = q("#loader-frame");
+            frame.onload = () => frame.classList.add("is-developed");
+            frame.src = imgUrl(first, 600, 70);
+        }
         const timeout = new Promise((r) => setTimeout(r, 3500));
         await Promise.race([Promise.all(fillHero(state.photos)), timeout]);
         status.textContent = "READY";
