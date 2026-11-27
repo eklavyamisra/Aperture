@@ -18,6 +18,7 @@ flowchart LR
         TOUR[tour.js<br/>walkthrough]
         CLOUD[cloud.js<br/>sign-in + sync]
         SHARE[share.js<br/>share panel]
+        COMM[comments.js<br/>comments panel]
         LS[(localStorage<br/>boards, views)]
         IDB[(IndexedDB<br/>uploaded images)]
     end
@@ -31,7 +32,7 @@ flowchart LR
     end
     subgraph Supabase
         AUTH[Auth<br/>email link, Google]
-        DB[(Postgres<br/>boards, shares)]
+        DB[(Postgres<br/>boards, shares, comments)]
         BUCKET[(Storage<br/>uploads bucket)]
     end
     UNS[api.unsplash.com]
@@ -53,6 +54,8 @@ flowchart LR
     BOARD -->|shared_board code, password| DB
     SHARE --> CLOUD
     SHARE -->|POST /api/board password| BOARD
+    COMM --> CLOUD
+    COMM <-->|pins.commentTarget, badges| PINS
 ```
 
 ## Repository layout
@@ -72,6 +75,7 @@ frontend/            the site, served as-is (Vercel's output directory)
     tour.js          first-run board walkthrough (window.tour)
     cloud.js         accounts and cloud sync (window.cloud)
     share.js         Share panel: short links, passwords, new link, stop sharing; visitors' password prompt
+    comments.js      comments panel on shared boards and on your own board; card badges (window.comments)
   img/               og.jpg (link preview), favicon.svg
   pages/             privacy.html, terms.html (served at /privacy and /terms)
 backend/
@@ -98,7 +102,7 @@ index.html (root)    redirect from the old GitHub Pages URL
 
 Classic `<script>` files, each wrapped in an IIFE, loaded in this order:
 GSAP + ScrollTrigger + Flip + Lenis (CDN) → `js/api.js` → `js/media.js` → `js/pins.js` → `js/tour.js` →
-`js/cloud.js` → `js/share.js` → `js/canvas.js` (`js/errors.js` loads first, in `<head>`).
+`js/cloud.js` → `js/share.js` → `js/comments.js` → `js/canvas.js` (`js/errors.js` loads first, in `<head>`).
 
 - **`api.js`** defines the shared globals the others rely on: `state` (current mode, query, filters,
   `photos`, paging token), `q`/`qa`, `api(path, params)`, `openLightbox`, `lb`, `lightbox`, `gsap`,
@@ -182,6 +186,27 @@ above that layer so strings end under the pin.
 - **PNG:** drawn on a 2D canvas, then each Unsplash photo is reported to `/photos/<id>/download`,
   as the API guidelines ask.
 
+## Comments (#20)
+
+Comments belong to a board, not to a share code, so they survive *New link* and go when the board is
+deleted. The `comments` table is closed to clients; everything goes through security-definer functions
+(`backend/supabase/schema.sql`):
+
+- `share_comments(code, password)`: anyone who can open the board (same password and wrong-try rules
+  as `shared_board`, through the shared `share_check()`); `mine` / `can_delete` for the caller.
+- `add_comment(code, password, item, name, body)`: signed in only. `board_comments(board)` and
+  `add_board_comment(...)`: the owner on their own board, shared or not.
+- `delete_comment(id)`: its author or the board's owner. 20 comments per person per 10 minutes.
+
+`comments.js` asks `pins.commentTarget()` what's on screen: `{ code, password }` on a `/b/` link (the
+password comes from the unlock prompt), `{ boardId }` on your own board (signed in), or nothing (hash
+links, signed out on your own board), and reloads on `pins:context`, `pins:open` and `cloud:state`.
+It refreshes every 20 s while the board is open. A comment can be about one card (`item_id`): the card
+menu ("Comment on this card…", also in view-only mode, by long press on touch), `C` on a focused card,
+or the card's count badge opens the panel anchored to it. Names are what the commenter types (prefilled
+from their Google name or email), never the email itself. Signing in from a `/b/` page returns to it
+(needs `<site>/b/*` in Supabase's Redirect URLs).
+
 ## Accounts and sync
 
 Supabase holds these, all locked to their owner by row-level security
@@ -248,6 +273,10 @@ All backend code is in `backend/api/`. The files in the root `api/` folder only 
 - `tests/cloud.spec.js`: accounts and sync against an in-memory Supabase stand-in in the test process
   (`window.__apertureBackend`), with ownership enforced like row-level security. Two browser profiles
   act as two devices. Other tests get `{}` from `/api/config`, so they stay local-only.
+- `tests/cloud.spec.js` also covers comments (owner, signed-out and signed-in visitors, card badges,
+  deleting, password-protected boards) against the fake's versions of the comment functions. The
+  database functions themselves were checked by loading `schema.sql` into PGlite with stand-ins for
+  Supabase's `auth` / `storage` schemas.
 - `tests/supabase-lock.spec.js`: the real Supabase wrapper in `cloud.js` against a stand-in library that,
   like supabase-js, runs auth callbacks inside its lock. Guards against the start-up deadlock (sync stuck
   on "Syncing…"): `cloud.js` reacts to auth changes only after the callback returns.

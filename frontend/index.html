@@ -285,6 +285,7 @@
                     <button type="button" id="pb-undo" class="pb-edit" data-cursor="Undo" aria-keyshortcuts="Control+Z" disabled>Undo</button>
                     <button type="button" id="pb-find-btn" data-cursor="Find" aria-keyshortcuts="Control+F /" aria-controls="pb-find">Find</button>
                     <button type="button" id="pb-palette-btn" data-cursor="Colours" aria-haspopup="dialog" aria-expanded="false" aria-controls="pb-palette">Palette</button>
+                    <button type="button" id="pb-comments-btn" data-cursor="Comments" aria-expanded="false" aria-controls="pb-comments" hidden>Comments <span class="pb-ccount" id="pb-ccount"></span></button>
                     <button type="button" id="pb-share" class="pb-edit" data-cursor="Share"><span>Share</span></button>
                     <button type="button" id="pb-export-btn" data-cursor="Export" aria-haspopup="menu" aria-expanded="false" aria-controls="pb-export-menu">Export ▾</button>
                     <button type="button" id="pb-account" class="pb-edit pb-account" data-cursor="Account" aria-haspopup="dialog" aria-controls="acct" hidden><span class="pb-account-dot" aria-hidden="true"></span><span class="pb-account-label">Sign in</span></button>
@@ -371,6 +372,29 @@
                 <label role="menuitem" class="pb-edit" tabindex="-1">Import a board file…<input type="file" id="pb-import" accept="application/json,.json" class="sr-only" tabindex="-1"></label>
             </div>
             <div class="pb-menu mono" id="pb-ctx" role="menu" aria-label="Actions" hidden></div>
+            <aside class="pbc" id="pb-comments" aria-labelledby="pbc-title" hidden>
+                <div class="pbc-head">
+                    <h3 class="pbc-title mono" id="pbc-title">Comments</h3>
+                    <button type="button" class="pbc-close" aria-label="Close comments">✕</button>
+                </div>
+                <p class="pbc-status mono" id="pbc-status" role="status"></p>
+                <ol class="pbc-list" id="pbc-list"></ol>
+                <form class="pbc-form" id="pbc-form" hidden>
+                    <p class="pbc-on mono" id="pbc-on" hidden><span id="pbc-on-label"></span><button type="button" id="pbc-on-clear" aria-label="Comment on the whole board instead">✕</button></p>
+                    <label class="sr-only" for="pbc-body">Your comment</label>
+                    <textarea id="pbc-body" rows="3" maxlength="1000" placeholder="Comment on the board…"></textarea>
+                    <div class="pbc-row">
+                        <label class="pbc-as mono" for="pbc-name">As</label>
+                        <input type="text" id="pbc-name" maxlength="40" autocomplete="nickname" spellcheck="false">
+                        <button type="submit" class="pbc-post mono" id="pbc-post">Post</button>
+                    </div>
+                    <p class="pbc-error" id="pbc-error" role="alert"></p>
+                </form>
+                <div class="pbc-signin" id="pbc-signin" hidden>
+                    <p>Sign in to comment. Anyone with the link can read comments.</p>
+                    <button type="button" class="pbc-post mono" id="pbc-signin-btn">Sign in</button>
+                </div>
+            </aside>
             <div class="pb-palette" id="pb-palette" role="dialog" aria-label="Board palette" hidden>
                 <p class="pb-palette-head mono"><span>Palette</span><button type="button" id="pb-palette-copy">Copy as CSS</button></p>
                 <ul class="pb-swatches" id="pb-swatches"></ul>
@@ -536,6 +560,7 @@
     <script src="js/tour.js"></script>
     <script src="js/cloud.js"></script>
     <script src="js/share.js"></script>
+    <script src="js/comments.js"></script>
     <script src="js/canvas.js"></script>
 </body>
 </html>

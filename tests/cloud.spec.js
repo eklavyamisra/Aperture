@@ -13,6 +13,32 @@ class FakeCloud {
         this.rows = new Map(); // `${owner}|${id}` -> row
         this.blobs = new Map(); // path -> data URL
         this.shares = new Map(); // code -> { owner, boardId, pass, fails }
+        this.comments = []; // { id, owner, boardId, author, author_name, item_id, body, created_at }
+        this.n = 0;
+    }
+    // share_check(): { status, owner, boardId } or null; the owner needs no password
+    shareCheck(code, password, me) {
+        const s = this.shares.get(code);
+        const r = s && this.rows.get(`${s.owner}|${s.boardId}`);
+        if (!r || r.deleted || !r.data) return null;
+        if (s.pass && s.owner !== me?.id) {
+            if (password == null) return { status: "locked" };
+            if (s.fails >= 10) return { status: "slow" };
+            if (password !== s.pass) return s.fails++, { status: "wrong" };
+        }
+        return { status: "ok", owner: s.owner, boardId: s.boardId };
+    }
+    commentRows(owner, boardId, me) {
+        return this.comments
+            .filter((c) => c.owner === owner && c.boardId === boardId)
+            .map((c) => ({ id: c.id, author_name: c.author_name, item_id: c.item_id, body: c.body, created_at: c.created_at, mine: c.author === me?.id, can_delete: !!me && (c.author === me.id || c.owner === me.id) }));
+    }
+    insertComment(me, owner, boardId, c) {
+        if (!me) throw new Error("sign in to comment");
+        const name = String(c.name || "").trim();
+        const body = String(c.body || "").trim();
+        if (!name || name.length > 40 || !body || body.length > 1000) throw new Error("bad comment");
+        this.comments.push({ id: `c${++this.n}`, owner, boardId, author: me.id, author_name: name, item_id: c.itemId ?? null, body, created_at: new Date().toISOString() });
     }
     // what Supabase's public shared_board(code, password) returns (schema.sql)
     sharedBoard(code, password = null) {
@@ -110,6 +136,34 @@ class FakeCloud {
                 this.shares.set(arg.code, { owner: me.id, boardId: arg.boardId, pass: null, fails: 0 });
                 return null;
             }
+            case "shareComments": {
+                const ok = this.shareCheck(arg.code, arg.password, me);
+                if (!ok) return [];
+                if (ok.status !== "ok") return [{ status: ok.status, id: null }];
+                return this.commentRows(ok.owner, ok.boardId, me).map((r) => ({ status: "ok", ...r }));
+            }
+            case "boardComments":
+                mine();
+                return this.commentRows(me.id, arg, me);
+            case "addComment": {
+                if (!me) throw new Error("sign in to comment");
+                if (arg.where.code) {
+                    const ok = this.shareCheck(arg.where.code, arg.where.password, me);
+                    if (!ok) throw new Error("board is not shared");
+                    if (ok.status !== "ok") throw new Error("wrong password");
+                    this.insertComment(me, ok.owner, ok.boardId, arg.c);
+                } else {
+                    if (!this.rows.has(`${me.id}|${arg.where.boardId}`)) throw new Error("not your board");
+                    this.insertComment(me, me.id, arg.where.boardId, arg.c);
+                }
+                return null;
+            }
+            case "deleteComment": {
+                const i = this.comments.findIndex((c) => c.id === arg && me && (c.author === me.id || c.owner === me.id));
+                if (i < 0) throw new Error("not allowed");
+                this.comments.splice(i, 1);
+                return null;
+            }
             case "wipe":
                 [...this.shares].filter(([, s]) => s.owner === me.id).forEach(([c]) => this.shares.delete(c));
                 mine().forEach((r) => this.rows.delete(`${me.id}|${r.id}`));
@@ -161,6 +215,10 @@ async function installCloud(context, cloud) {
             renameShare: (boardId, code) => call("renameShare", { boardId, code }),
             setSharePassword: (boardId, password) => call("setSharePassword", { boardId, password }),
             deleteShare: (boardId) => call("deleteShare", boardId),
+            shareComments: (code, password) => call("shareComments", { code, password: password ?? null }),
+            boardComments: (boardId) => call("boardComments", boardId),
+            addComment: (where, c) => call("addComment", { where, c }),
+            deleteComment: (id) => call("deleteComment", id),
             wipe: () => call("wipe"),
         };
     });
@@ -501,5 +559,129 @@ test("cloud: password-protected links, new links and stop sharing", async ({ pag
         expect(cloud.shares.size).toBe(0);
         await B.goto(link);
         await expect(B.locator("#toast")).toContainText("doesn't exist any more", { timeout: 30000 });
+    });
+});
+
+test("cloud: comments on a shared board", async ({ page, freshPage }, info) => {
+    const cloud = new FakeCloud();
+    const A = page;
+    const B = freshPage;
+    await installCloud(B.context(), cloud);
+    await serveSharePages(B.context(), cloud);
+    B.on("dialog", (d) => d.accept());
+    await sharedSetup(A, cloud, "owner@example.com", info);
+    let link;
+    const comments = (p) => p.locator("#pbc-list .pbc-item");
+
+    await test.step("the owner shares the board; there are no comments yet", async () => {
+        await openSharePanel(A);
+        await A.locator("#share-create").click();
+        await expect(A.locator("#share-url")).toHaveValue(/\/b\//, { timeout: 15000 });
+        link = await A.locator("#share-url").inputValue();
+        await closeSharePanel(A);
+        await expect(A.locator("#pb-comments-btn")).toBeVisible();
+        await A.locator("#pb-comments-btn").click();
+        await expect(A.locator("#pbc-list")).toContainText("No comments yet");
+        await A.locator("#pb-comments .pbc-close").click();
+        await expect(A.locator("#pb-comments")).toBeHidden();
+    });
+
+    await test.step("a signed-out visitor can read but is asked to sign in to comment", async () => {
+        await B.goto(link);
+        await B.waitForSelector("#pb.is-readonly:not([hidden])", { timeout: 30000 });
+        await B.locator("#pb-comments-btn").click();
+        await expect(B.locator("#pbc-signin")).toBeVisible();
+        await expect(B.locator("#pbc-form")).toBeHidden();
+        await expect(B.locator("#pbc-signin-btn")).toBeFocused();
+    });
+
+    await test.step("after signing in, the visitor comments on a card and on the board", async () => {
+        await B.locator("#pbc-signin-btn").click();
+        await expect(B.locator("#acct")).toBeVisible();
+        await B.locator("#acct-email").fill("vi@example.com");
+        await B.locator("#acct-form button[type=submit]").click();
+        await expect(B.locator("#acct-who")).toHaveText("vi@example.com");
+        await B.keyboard.press("Escape");
+        await expect(B.locator("#acct")).toBeHidden();
+        await expect(B.locator("#pbc-form")).toBeVisible();
+        await expect(B.locator("#pbc-name")).toHaveValue("vi");
+        await B.locator("#pbc-name").fill("Vi");
+
+        // right-click a card: the read-only menu offers a comment on it
+        await B.locator(".pb-card").first().click({ button: "right" });
+        await B.locator("#pb-ctx button", { hasText: "Comment on this card" }).click();
+        await expect(B.locator("#pbc-on")).toBeVisible();
+        await expect(B.locator("#pbc-body")).toBeFocused();
+        await B.keyboard.type("Love the light here");
+        await B.keyboard.press("Control+Enter");
+        await expect(comments(B)).toHaveCount(1, { timeout: 15000 });
+        await expect(comments(B).first().locator(".pbc-chip")).toBeVisible();
+        await expect(B.locator(".pb-card .pb-cbadge:not([hidden])")).toHaveCount(1);
+        await expect(B.locator(".pb-card .pb-cbadge:not([hidden])")).toHaveText("1");
+        await expect(B.locator("#pbc-on")).toBeHidden();
+
+        await B.locator("#pbc-body").fill("Whole board feels warm.");
+        await B.locator("#pbc-post").click();
+        await expect(comments(B)).toHaveCount(2, { timeout: 15000 });
+        await expect(B.locator("#pb-ccount")).toHaveText("2");
+        expect(cloud.comments.map((c) => [c.author_name, !!c.item_id])).toEqual([["Vi", true], ["Vi", false]]);
+    });
+
+    await test.step("the owner sees them on their own board, deletes one and replies", async () => {
+        await A.evaluate(() => window.comments.reload());
+        await expect(A.locator("#pb-ccount")).toHaveText("2", { timeout: 15000 });
+        await expect(A.locator(".pb-card .pb-cbadge:not([hidden])")).toHaveCount(1);
+        // the badge opens the comments
+        await A.locator(".pb-card .pb-cbadge:not([hidden])").click();
+        await expect(A.locator("#pb-comments")).toBeVisible();
+        await expect(A.locator("#pbc-on")).toBeVisible();
+        await expect(comments(A)).toHaveCount(2);
+        await expect(comments(A).first()).toHaveClass(/is-focus/);
+        await comments(A).nth(1).locator(".pbc-del").click(); // confirm() accepted
+        await expect(comments(A)).toHaveCount(1, { timeout: 15000 });
+        await A.locator("#pbc-on-clear").click();
+        await A.locator("#pbc-name").fill("Owner");
+        await A.locator("#pbc-body").fill("Thanks, glad it works!");
+        await A.locator("#pbc-post").click();
+        await expect(comments(A)).toHaveCount(2, { timeout: 15000 });
+    });
+
+    await test.step("the visitor sees the reply and can delete only their own", async () => {
+        await B.evaluate(() => window.comments.reload());
+        await expect(comments(B)).toHaveCount(2, { timeout: 15000 });
+        await expect(comments(B).nth(0).locator(".pbc-del")).toHaveCount(1);
+        await expect(comments(B).nth(1).locator(".pbc-del")).toHaveCount(0);
+        await expect(comments(B).nth(1)).toContainText("Owner");
+        // the chip flies to the card
+        await comments(B).nth(0).locator(".pbc-chip").click();
+        await expect(B.locator(".pb-card.is-hit")).toHaveCount(1);
+    });
+
+    await test.step("on a password-protected board, comments need the password too", async () => {
+        await openSharePanel(A);
+        await A.locator("#share-withpass").check();
+        await A.locator("#share-pass").fill("north light");
+        await A.locator("#share-pass-save").click();
+        await expect(A.locator("#share-status")).toContainText("the link and the password", { timeout: 15000 });
+        await closeSharePanel(A);
+
+        await B.reload();
+        await expect(B.locator("#share [data-view=unlock]")).toBeVisible({ timeout: 30000 });
+        await B.locator("#share-unlock-pass").fill("north light");
+        await B.keyboard.press("Enter");
+        await B.waitForSelector("#pb.is-readonly:not([hidden])", { timeout: 30000 });
+        await expect(B.locator("#pb-ccount")).toHaveText("2", { timeout: 15000 });
+        await B.locator("#pb-comments-btn").click();
+        await B.locator("#pbc-body").fill("Still here");
+        await B.locator("#pbc-post").click();
+        await expect(comments(B)).toHaveCount(3, { timeout: 15000 });
+    });
+
+    await test.step("a saved copy is the visitor's own board; signing out hides comments", async () => {
+        await B.locator("#pb-keep").click(); // a local copy: not shared, so no comments here
+        await expect(B.locator("#pb-comments-btn")).toBeVisible(); // signed in: own board
+        await B.locator("#pb-account").click();
+        await B.locator("#acct-signout").click();
+        await expect(B.locator("#pb-comments-btn")).toBeHidden();
     });
 });

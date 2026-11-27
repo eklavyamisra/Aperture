@@ -93,6 +93,43 @@ test("a11y: share panel and password prompt", async ({ page }, info) => {
     await scan(page, info, "unlock", "#share");
 });
 
+test("a11y: comments panel", async ({ page }, info) => {
+    // signed in, on your own board, with a comment on a card and one on the board
+    await page.addInitScript(() => {
+        const at = new Date(Date.now() - 5 * 60000).toISOString();
+        window.__apertureBackend = {
+            session: async () => ({ id: "user-1", email: "a11y@example.com", name: "Ada" }),
+            onChange() {},
+            signOut: async () => {},
+            list: async () => [],
+            get: async () => [],
+            upsert: async () => {},
+            putBlob: async () => {},
+            getBlob: async () => null,
+            findShare: async () => null,
+            createShare: async () => {},
+            shareComments: async () => [],
+            boardComments: async () => [
+                { id: "c1", author_name: "Vi", item_id: window.__firstCard || null, body: "Love the light here", created_at: at, mine: false, can_delete: true },
+                { id: "c2", author_name: "Ada", item_id: null, body: "Thanks!", created_at: at, mine: true, can_delete: true },
+            ],
+            addComment: async () => {},
+            deleteComment: async () => {},
+        };
+    });
+    await openGrid(page);
+    await page.evaluate(() => state.photos.slice(0, 2).forEach((p) => window.pins.toggle(p)));
+    await page.evaluate(() => (window.__firstCard = state.photos[0].id));
+    await openBoard(page);
+    await page.evaluate(() => window.comments.reload());
+    await expect(page.locator("#pb-comments-btn")).toBeVisible();
+    await page.locator("#pb-comments-btn").click();
+    await expect(page.locator("#pbc-list .pbc-item")).toHaveCount(2);
+    await expect(page.locator("#pbc-body")).toBeFocused();
+    await scan(page, info, "comments", "#pb-comments");
+    await scan(page, info, "comment-badge", ".pb-cbadge:not([hidden])");
+});
+
 for (const path of ["/privacy", "/terms"]) {
     test(`a11y: ${path}`, async ({ page }, info) => {
         await page.goto(path);

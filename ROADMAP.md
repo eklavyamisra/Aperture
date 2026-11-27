@@ -8,7 +8,7 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 |---|---|---|
 | 0 | Fix before more users arrive | ✅ 4 of 5 (approval left until needed) |
 | 1 | Make the board useful without Unsplash | ✅ 9 of 9 |
-| 2 | Accounts and the cloud (paid tier starts here) | 🟡 5 of 6 (Supabase) |
+| 2 | Accounts and the cloud (paid tier starts here) | ✅ 6 of 6 (Supabase; #20 needs the updated schema run) |
 | 3 | Teams and money | ⬜ |
 | Alongside | Growth and quality | 🟡 3 of 5 |
 
@@ -40,7 +40,7 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 
 **Backend chosen: Supabase.** Sign-in by email magic link and Google. Boards already on a device move into the account on first sign-in. Live since 27 November 2026 (project `kumohsngovsawzukrnuw`). Setup steps: README → *Accounts (Supabase)*.
 
-**Before real traffic:** custom SMTP for sign-in emails (Supabase's built-in mailer sends only a few an hour), and **Publish app** in Google Auth Platform (until then only listed test users can use Google sign-in).
+**Before real traffic:** custom SMTP for sign-in emails (Supabase's built-in mailer sends only a few an hour), and **Publish app** in Google Auth Platform (until then only listed test users can use Google sign-in). For #20, add `https://aperture-bice-nine.vercel.app/b/*` to Supabase's Redirect URLs so signing in to comment returns to the shared board (otherwise it lands on the home page).
 
 | # | Item | Size | Status |
 |---|---|---|---|
@@ -49,7 +49,7 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 | 17 | Image storage for uploads | M | ✅ live (private bucket per user) |
 | 18 | Shared boards with real link previews (short URLs) | M | ✅ live (`/b/<code>`, signed-in only; the link always shows the latest synced board; uploads left out) |
 | 19 | Private and password-protected share links | S | ✅ built (Share panel: anyone with the link, or password only; New link; Stop sharing). "Private" means the owner decides who can open it; invite-by-email isn't included |
-| 20 | Comments on shared boards | M | ⬜ |
+| 20 | Comments on shared boards | M | ✅ built; live once the updated `schema.sql` is run. Anyone who can open a `/b/` link reads comments; only signed-in people write; a comment can be about one card (badge with a count); author or board owner can delete |
 
 ## Phase 3: Teams and money
 
@@ -80,8 +80,8 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 
 ## Suggested next steps
 
-1. #20 comments on shared boards (needs a decision: may viewers without an account comment?).
-   Follow-ups to #15–19: full account deletion from inside the app (needs a server key), live updates instead of the 45 s sync check,
+1. Phase 3: #21 real-time collaboration is the big one; #24 teams and #25 billing wait on the pricing decision.
+   Follow-ups to #15–20: comment notifications (email or an unread count), live comments instead of the 20 s refresh, full account deletion from inside the app (needs a server key), live updates instead of the 45 s sync check,
    and showing uploaded images on shared boards (signed URLs from the private bucket).
 2. #27 landing page and waitlist (can share the same backend for storing emails).
 3. #22 presentation mode and #23 PDF export are client-only and can be done any time.

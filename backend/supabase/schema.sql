@@ -1,4 +1,4 @@
--- Aperture: accounts, synced boards, uploaded images (roadmap #15–17) and share links (#18–19).
+-- Aperture: accounts, synced boards, uploaded images (roadmap #15–17), share links (#18–19) and comments (#20).
 -- Run once in the Supabase dashboard: SQL Editor → New query → paste → Run.
 -- Safe to re-run.
 
@@ -133,16 +133,15 @@ end $$;
 revoke all on function public.set_share_password(text, text) from public, anon;
 grant execute on function public.set_share_password(text, text) to authenticated;
 
--- The one public read: a board by its share code, minus uploaded images (they
--- live in each owner's private bucket). Answers with a status:
---   ok      the board (name, data, updated)
+-- Internal: may this caller open the board behind a share code? Answers one row
+--   ok      (with the board's owner and id)
 --   locked  it has a password and none was given
 --   wrong   the password didn't match
 --   slow    10 wrong tries in 15 minutes: no more checks until that window ends
--- No row: no such code, or the board is deleted.
-drop function if exists public.shared_board(text);
-create or replace function public.shared_board(share_code text, password text default null)
-returns table (status text, name text, data jsonb, updated bigint)
+-- No row: no such code, or the board is deleted. The board's owner never needs
+-- the password. Only the functions below call it.
+create or replace function public.share_check(share_code text, password text)
+returns table (status text, owner uuid, board_id text)
 language plpgsql volatile security definer set search_path = public, extensions as $$
 #variable_conflict use_column
 declare
@@ -157,14 +156,14 @@ begin
         return;
     end if;
 
-    if s.pass_hash is not null then
+    if s.pass_hash is not null and s.owner is distinct from auth.uid() then
         if password is null then
-            return query select 'locked'::text, null::text, null::jsonb, null::bigint;
+            return query select 'locked'::text, null::uuid, null::text;
             return;
         end if;
         recent := s.fail_window is not null and s.fail_window > now() - interval '15 minutes';
         if recent and s.fails >= 10 then
-            return query select 'slow'::text, null::text, null::jsonb, null::bigint;
+            return query select 'slow'::text, null::uuid, null::text;
             return;
         end if;
         if crypt(password, s.pass_hash) is distinct from s.pass_hash then
@@ -172,11 +171,35 @@ begin
                set fails = case when recent then fails + 1 else 1 end,
                    fail_window = case when recent then fail_window else now() end
              where code = s.code;
-            return query select 'wrong'::text, null::text, null::jsonb, null::bigint;
+            return query select 'wrong'::text, null::uuid, null::text;
             return;
         end if;
     end if;
 
+    return query select 'ok'::text, s.owner, s.board_id;
+end $$;
+
+revoke all on function public.share_check(text, text) from public, anon, authenticated;
+
+-- The one public read of a board: by its share code, minus uploaded images (they
+-- live in each owner's private bucket). status is share_check()'s; name, data and
+-- updated come only with 'ok'.
+drop function if exists public.shared_board(text);
+create or replace function public.shared_board(share_code text, password text default null)
+returns table (status text, name text, data jsonb, updated bigint)
+language plpgsql volatile security definer set search_path = public, extensions as $$
+#variable_conflict use_column
+declare
+    c record;
+begin
+    select * into c from public.share_check(share_code, password);
+    if not found then
+        return;
+    end if;
+    if c.status <> 'ok' then
+        return query select c.status, null::text, null::jsonb, null::bigint;
+        return;
+    end if;
     return query
         select 'ok'::text,
                b.name,
@@ -187,8 +210,148 @@ begin
                    '[]'::jsonb)),
                b.updated
           from public.boards b
-         where b.owner = s.owner and b.id = s.board_id;
+         where b.owner = c.owner and b.id = c.board_id;
 end $$;
 
 revoke all on function public.shared_board(text, text) from public;
 grant execute on function public.shared_board(text, text) to anon, authenticated;
+
+
+-- ---------- comments (#20) ----------
+-- Comments belong to a board (not to a share code), so they survive "New link".
+-- Anyone who can open the shared board can read them; only signed-in people can
+-- write. A comment may point at one card (item_id). Its author or the board's
+-- owner can delete it. Deleting the board, or either account, deletes them.
+-- The table itself is closed: every read and write goes through the functions below.
+create table if not exists public.comments (
+    id          uuid primary key default gen_random_uuid(),
+    board_owner uuid not null,
+    board_id    text not null,
+    author      uuid not null default auth.uid() references auth.users (id) on delete cascade,
+    author_name text not null check (char_length(author_name) between 1 and 40),
+    item_id     text check (item_id is null or item_id ~ '^[A-Za-z0-9_-]{1,64}$'),
+    body        text not null check (char_length(body) between 1 and 1000),
+    created_at  timestamptz not null default now(),
+    foreign key (board_owner, board_id) references public.boards (owner, id) on delete cascade
+);
+create index if not exists comments_board on public.comments (board_owner, board_id, created_at);
+create index if not exists comments_author on public.comments (author, created_at);
+
+alter table public.comments enable row level security;
+revoke all on public.comments from anon, authenticated;
+
+-- Internal: the insert both ways of commenting share, with a limit of 20 comments
+-- per person per 10 minutes.
+create or replace function public.comment_insert(owner_id uuid, board text, item text, name text, body text)
+returns uuid language plpgsql volatile security definer set search_path = public as $$
+declare
+    new_id uuid;
+begin
+    if auth.uid() is null then
+        raise exception 'sign in to comment';
+    end if;
+    if (select count(*) from public.comments c where c.author = auth.uid() and c.created_at > now() - interval '10 minutes') >= 20 then
+        raise exception 'too many comments, wait a few minutes';
+    end if;
+    insert into public.comments (board_owner, board_id, author, author_name, item_id, body)
+    values (owner_id, board, auth.uid(), btrim(name), item, btrim(body))
+    returning id into new_id;
+    return new_id;
+end $$;
+
+revoke all on function public.comment_insert(uuid, text, text, text, text) from public, anon, authenticated;
+
+-- Comments on a shared board, oldest first. status is share_check()'s: a row with
+-- only a status (and no id) means the board can't be opened with what was given.
+-- mine / can_delete are for the signed-in caller (false for visitors).
+create or replace function public.share_comments(share_code text, password text default null)
+returns table (status text, id uuid, author_name text, item_id text, body text, created_at timestamptz, mine boolean, can_delete boolean)
+language plpgsql volatile security definer set search_path = public, extensions as $$
+#variable_conflict use_column
+declare
+    c record;
+begin
+    select * into c from public.share_check(share_code, password);
+    if not found then
+        return;
+    end if;
+    if c.status <> 'ok' then
+        return query select c.status, null::uuid, null::text, null::text, null::text, null::timestamptz, false, false;
+        return;
+    end if;
+    return query
+        select 'ok'::text, cm.id, cm.author_name, cm.item_id, cm.body, cm.created_at,
+               coalesce(cm.author = auth.uid(), false),
+               coalesce(cm.author = auth.uid() or cm.board_owner = auth.uid(), false)
+          from public.comments cm
+         where cm.board_owner = c.owner and cm.board_id = c.board_id
+         order by cm.created_at
+         limit 500;
+end $$;
+
+revoke all on function public.share_comments(text, text) from public;
+grant execute on function public.share_comments(text, text) to anon, authenticated;
+
+-- A signed-in visitor comments on a shared board (with the password, if it has one).
+create or replace function public.add_comment(share_code text, password text, item text, name text, body text)
+returns uuid language plpgsql volatile security definer set search_path = public, extensions as $$
+declare
+    c record;
+begin
+    if auth.uid() is null then
+        raise exception 'sign in to comment';
+    end if;
+    select * into c from public.share_check(share_code, password);
+    if not found then
+        raise exception 'board is not shared';
+    end if;
+    if c.status = 'slow' then
+        raise exception 'too many wrong tries';
+    elsif c.status <> 'ok' then
+        raise exception 'wrong password';
+    end if;
+    return public.comment_insert(c.owner, c.board_id, item, name, body);
+end $$;
+
+revoke all on function public.add_comment(text, text, text, text, text) from public, anon;
+grant execute on function public.add_comment(text, text, text, text, text) to authenticated;
+
+-- The owner reads, and replies to, comments on their own board (shared or not).
+create or replace function public.board_comments(board text)
+returns table (id uuid, author_name text, item_id text, body text, created_at timestamptz, mine boolean, can_delete boolean)
+language sql stable security definer set search_path = public as $$
+    select cm.id, cm.author_name, cm.item_id, cm.body, cm.created_at, cm.author = auth.uid(), true
+      from public.comments cm
+     where cm.board_owner = auth.uid() and cm.board_id = board
+     order by cm.created_at
+     limit 500
+$$;
+
+revoke all on function public.board_comments(text) from public, anon;
+grant execute on function public.board_comments(text) to authenticated;
+
+create or replace function public.add_board_comment(board text, item text, name text, body text)
+returns uuid language plpgsql volatile security definer set search_path = public as $$
+begin
+    if auth.uid() is null or not exists (select 1 from public.boards b where b.owner = auth.uid() and b.id = board and not b.deleted) then
+        raise exception 'not your board';
+    end if;
+    return public.comment_insert(auth.uid(), board, item, name, body);
+end $$;
+
+revoke all on function public.add_board_comment(text, text, text, text) from public, anon;
+grant execute on function public.add_board_comment(text, text, text, text) to authenticated;
+
+-- Its author or the board's owner deletes a comment.
+create or replace function public.delete_comment(comment uuid)
+returns void language plpgsql volatile security definer set search_path = public as $$
+begin
+    delete from public.comments c
+     where c.id = comment and (c.author = auth.uid() or c.board_owner = auth.uid());
+    if not found then
+        raise exception 'not allowed';
+    end if;
+end $$;
+
+revoke all on function public.delete_comment(uuid) from public, anon;
+grant execute on function public.delete_comment(uuid) to authenticated;

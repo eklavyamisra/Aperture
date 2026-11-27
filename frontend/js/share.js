@@ -210,7 +210,8 @@
                         const shared = await r.json();
                         onClose = null;
                         close();
-                        return resolve(shared);
+                        // the password comes along so comments on this board can use it (#20)
+                        return resolve({ ...shared, password });
                     }
                     el.error.textContent =
                         { 403: "That password isn't right.", 429: "Too many wrong tries. Wait 15 minutes, then try again.", 404: "This board isn't shared any more." }[r.status] ||

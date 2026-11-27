@@ -6,7 +6,8 @@
    board too. Uploaded images go to a private storage bucket under the
    user's id. A board can also get a short share link (/b/<code>, #18)
    that always shows its latest synced copy, optionally behind a password
-   (#19). The Share panel for that is share.js; this holds the calls.
+   (#19). The Share panel for that is share.js; this holds the calls, and
+   the ones for comments on shared boards (#20, comments.js).
 
    Off unless /api/config returns Supabase settings: then the account
    button stays hidden and nothing here runs. Tests swap in their own
@@ -61,12 +62,18 @@
         const sb = window.supabase.createClient(url, anonKey, {
             auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, storageKey: "aperture:auth" },
         });
-        const who = (s) => (s?.user ? { id: s.user.id, email: s.user.email || "" } : null);
+        const who = (s) => {
+            if (!s?.user) return null;
+            const meta = s.user.user_metadata || {};
+            return { id: s.user.id, email: s.user.email || "", name: String(meta.full_name || meta.name || "").slice(0, 40) };
+        };
         const must = ({ data, error }) => {
             if (error) throw error;
             return data;
         };
-        const back = `${location.origin}/`;
+        // after signing in, come back to the shared board being viewed (needs
+        // "<site>/b/*" in Supabase's Redirect URLs; otherwise Supabase uses the site root)
+        const back = () => `${location.origin}${location.pathname.startsWith("/b/") ? location.pathname : "/"}`;
         return {
             async session() {
                 return who(must(await sb.auth.getSession()).session);
@@ -81,10 +88,10 @@
                 });
             },
             async signInEmail(email) {
-                must(await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: back } }));
+                must(await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: back() } }));
             },
             async signInGoogle() {
-                must(await sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo: back } }));
+                must(await sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo: back() } }));
             },
             async signOut() {
                 await sb.auth.signOut();
@@ -120,6 +127,19 @@
             },
             async deleteShare(boardId) {
                 must(await sb.from("shares").delete().eq("board_id", boardId));
+            },
+            async shareComments(code, password) {
+                return must(await sb.rpc("share_comments", { share_code: code, password: password ?? null }));
+            },
+            async boardComments(boardId) {
+                return must(await sb.rpc("board_comments", { board: boardId }));
+            },
+            async addComment(where, c) {
+                if (where.code) must(await sb.rpc("add_comment", { share_code: where.code, password: where.password ?? null, item: c.itemId ?? null, name: c.name, body: c.body }));
+                else must(await sb.rpc("add_board_comment", { board: where.boardId, item: c.itemId ?? null, name: c.name, body: c.body }));
+            },
+            async deleteComment(id) {
+                must(await sb.rpc("delete_comment", { comment: id }));
             },
             async wipe() {
                 must(await sb.from("boards").delete().eq("owner", user.id));
@@ -366,6 +386,8 @@
     function setState(s) {
         state = s;
         render();
+        // comments.js shows or hides its composer as people sign in and out
+        document.dispatchEvent(new CustomEvent("cloud:state", { detail: { state: s, user: user?.id || null } }));
     }
 
     function render() {
@@ -506,6 +528,32 @@
         if (u) signedIn(u);
     }
 
-    window.cloud = { sync, share, state: () => state, user: () => user, open, close };
+    /* ---------- comments (#20) ---------- */
+    // `where` is { code, password } on a shared board, or { boardId } on your own.
+    // Reading works signed out; writing needs an account (the database checks).
+    const comments = {
+        available: () => !!backend?.shareComments,
+        async list(where) {
+            if (!backend?.shareComments) throw new Error("accounts are off");
+            if (where.code) {
+                const rows = (await backend.shareComments(where.code, where.password)) || [];
+                const blocked = rows.find((r) => r.status && r.status !== "ok");
+                if (blocked) throw Object.assign(new Error(blocked.status), { status: blocked.status });
+                return rows.filter((r) => r.id);
+            }
+            needAccount();
+            return (await backend.boardComments(where.boardId)) || [];
+        },
+        async add(where, c) {
+            needAccount();
+            await backend.addComment(where, c);
+        },
+        async remove(id) {
+            needAccount();
+            await backend.deleteComment(id);
+        },
+    };
+
+    window.cloud = { sync, share, comments, state: () => state, user: () => user, open, close };
     start();
 })();

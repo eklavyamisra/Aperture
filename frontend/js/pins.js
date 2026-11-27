@@ -234,6 +234,10 @@
     let B; // { name, pins (items of every kind), threads, frames }
     const ids = new Set();
     let readonly = false; // viewing someone's shared link
+    let shared = null; // { code, password } while viewing a /b/<code> link: comments go there (#20)
+    let commentCounts = new Map(); // item id -> comments on that card (comments.js fills it)
+    // the board on screen changed (switched, opened a shared one, left it): comments.js reloads
+    const contextChanged = () => document.dispatchEvent(new CustomEvent("pins:context"));
     const reindex = () => {
         ids.clear();
         B.pins.forEach((x) => ids.add(x.id));
@@ -677,6 +681,7 @@
             else fit(false);
         }
         announce(`Switched to ${B.name}`);
+        contextChanged();
     }
 
     q("#pb-new").addEventListener("click", () => {
@@ -1188,6 +1193,18 @@
             if (document.activeElement !== note) note.value = x.note || "";
             note.readOnly = readonly;
             el.setAttribute("aria-label", ariaFor(x));
+            const n = commentCounts.get(x.id) || 0;
+            let badge = el.querySelector(".pb-cbadge");
+            if (n && !badge) {
+                badge = actButton("comments", "", "Comments");
+                badge.classList.add("pb-cbadge");
+                el.appendChild(badge);
+            }
+            if (badge) {
+                badge.hidden = !n;
+                badge.textContent = n > 99 ? "99+" : String(n);
+                badge.setAttribute("aria-label", `${n} comment${n === 1 ? "" : "s"} on this card`);
+            }
             const loc = el.querySelector('[data-act="locate"]');
             if (loc) {
                 const onWall = !!window.canvasView?.onWall?.(x.id);
@@ -1618,11 +1635,14 @@
 
     function cardMenu(id, at, sheet) {
         const x = pinBy(id);
-        if (!x || readonly) return;
+        if (!x) return;
+        const comment = window.comments?.available?.() ? { label: "Comment on this card…", run: () => window.comments.open(id) } : null;
+        if (readonly) return comment ? ctxMenu([comment], at, sheet) : undefined;
         const many = sel.size > 1 && sel.has(id);
         ctxMenu(
             [
                 { label: "Tie a thread from here…", run: () => startThreadFrom(id) },
+                many ? null : comment,
                 many ? null : { label: sel.has(id) ? "Deselect" : "Select", run: () => (sel.has(id) ? (sel.delete(id), syncSel()) : setSel([id], true)) },
                 { label: "Bring to front", run: () => (cardEl(id).style.zIndex = ++top) },
                 many ? { label: `Group ${sel.size} selected`, run: () => frameAround([...sel]) } : null,
@@ -1770,6 +1790,8 @@
             closeBoard(() => window.canvasView?.locate?.(id));
         } else if (btn.dataset.act === "tint") {
             cycleTint(id);
+        } else if (btn.dataset.act === "comments") {
+            window.comments?.open(id);
         }
     });
 
@@ -1972,6 +1994,26 @@
         const card = e.target.closest(".pb-card");
         const frame = e.target.closest(".pb-frame");
         const touch = e.pointerType === "touch";
+
+        // view-only on a touch screen: a long press still opens the card's menu (to comment
+        // on it); the finger can pan the board as usual meanwhile
+        if (card && readonly && touch && window.comments?.available?.() && !e.target.closest("button, a")) {
+            const id = card.dataset.id;
+            const [sx, sy] = [e.clientX, e.clientY];
+            const evs = ["pointermove", "pointerup", "pointercancel"];
+            const off = () => evs.forEach((t) => removeEventListener(t, cancel, true));
+            const cancel = (ev) => {
+                if (ev.type === "pointermove" && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 10) return;
+                clearTimeout(t);
+                off();
+            };
+            const t = setTimeout(() => {
+                off();
+                armSheet();
+                cardMenu(id, [sx, sy], true);
+            }, LONG_PRESS);
+            evs.forEach((ev) => addEventListener(ev, cancel, true));
+        }
 
         if (card && !readonly) {
             const id = card.dataset.id;
@@ -2413,6 +2455,8 @@
                 f: () => fit(true),
                 "/": openFind,
                 m: toggleMinimap,
+                // comments on the focused card, or on the board (#20)
+                ...(window.comments?.available?.() ? { c: () => window.comments.open(card ? card.dataset.id : undefined) } : {}),
             };
             const edit = {
                 g: () => (sel.size > 1 ? frameAround([...sel]) : newFrame()),
@@ -3303,6 +3347,7 @@
         q("#pb-shared-name").textContent = data.name;
         closePop(false);
         render();
+        contextChanged();
     }
 
     // a /b/<code> page: back to the plain app address once the shared board is closed
@@ -3315,6 +3360,7 @@
 
     function leaveShared() {
         leavePath();
+        shared = null;
         readonly = false;
         board.classList.remove("is-readonly");
         sharedBar.hidden = true;
@@ -3322,6 +3368,7 @@
         loadView();
         syncSwitcher();
         render();
+        contextChanged();
     }
 
     q("#pb-keep").addEventListener("click", () => {
@@ -3331,6 +3378,7 @@
         if (index.list.some((b) => b.name === name)) name = `${name} (shared)`;
         copy.name = name.slice(0, 60);
         readonly = false;
+        shared = null;
         leavePath();
         board.classList.remove("is-readonly");
         sharedBar.hidden = true;
@@ -3370,22 +3418,27 @@
         const toBoard = (x) => cleanBoard({ ...x.data, name: x.name }, "Shared board");
         // password-protected (#19): ask once the wall is up, then fetch the board (share.js)
         if (s?.locked && typeof s.code === "string") {
+            const ctx = { code: s.code, password: null };
             return showShared(async () => {
                 const got = await window.share?.unlock(s.code);
-                if (got?.data && typeof got.data === "object") return toBoard(got);
+                if (got?.data && typeof got.data === "object") {
+                    ctx.password = got.password || null;
+                    return toBoard(got);
+                }
                 leavePath();
                 return null;
-            });
+            }, ctx);
         }
         if (!s?.data || typeof s.data !== "object") {
             leavePath();
             return toast(s?.error ? "Couldn't load that shared board. Try the link again in a moment." : "That shared board doesn't exist any more. Its owner may have deleted it.", "warn");
         }
-        showShared(toBoard(s));
+        showShared(toBoard(s), typeof s.code === "string" ? { code: s.code, password: null } : null);
     }
 
-    // `source` is the board, or an async function that gives it (null: give up)
-    function showShared(source) {
+    // `source` is the board, or an async function that gives it (null: give up).
+    // `ctx` is the /b/ link's { code, password } (none for #board= links: no comments there)
+    function showShared(source, ctx = null) {
         // wait for the first page so the canvas (which hosts the board) can open
         const t0 = Date.now();
         const wait = setInterval(() => {
@@ -3398,6 +3451,7 @@
                 async () => {
                     const data = typeof source === "function" ? await source() : source;
                     if (!data) return;
+                    shared = ctx;
                     enterShared(data);
                     if (board.hidden) openBoard();
                     else fit(false);
@@ -3764,5 +3818,23 @@
         openBoard,
         closeBoard,
         local,
+        // for comments.js (#20)
+        commentTarget: () => (board.hidden ? null : shared ? { ...shared } : readonly ? null : { boardId: index.active }),
+        isShared: () => !!shared,
+        boardName: () => B.name,
+        itemLabel: (id) => (has(id) ? labelOf(pinBy(id)) : null),
+        focusItem(id) {
+            const g = geo.get(id);
+            if (!g) return false;
+            flyTo(g.l + g.w / 2, g.t + g.h / 2);
+            const el = cardEl(id);
+            el?.classList.add("is-hit");
+            setTimeout(() => el?.classList.remove("is-hit"), 1600);
+            return true;
+        },
+        setCommentCounts(map) {
+            commentCounts = map instanceof Map ? map : new Map();
+            if (!board.hidden) render();
+        },
     };
 })();

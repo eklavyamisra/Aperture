@@ -49,8 +49,10 @@ Accounts stay switched off until these are done; the site works local-only meanw
    npx vercel env add SUPABASE_ANON_KEY production
    ```
    and redeploy. Locally, add the same two lines to `.env.local`. Never use the `service_role` key here.
-7. When `schema.sql` changes (for example the `shares` table and `shared_board()` for short share links),
-   paste and run it again. It's safe to re-run.
+7. When `schema.sql` changes (for example the `shares` table and `shared_board()` for short share links,
+   or `comments` for #20), paste and run it again. It's safe to re-run.
+8. **Authentication → URL Configuration → Redirect URLs**: add `https://aperture-bice-nine.vercel.app/b/*`
+   (and `http://localhost:5173/b/*`), so signing in to comment on a shared board returns to that board.
 
 ## After the first deploy
 
