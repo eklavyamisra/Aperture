@@ -475,7 +475,8 @@ em {
     .f4, .f5 { display: none; }
     .f1 { top: 12%; right: 4%; }
     .f2 { top: 52%; left: auto; right: 6%; }
-    .f3 { bottom: 26%; right: auto; left: 6%; }
+    /* up beside the title: lower down it sat behind the search field */
+    .f3 { top: 24%; bottom: auto; right: auto; left: 6%; width: 92px; }
 }
 
 /* search */
@@ -1232,7 +1233,8 @@ input[type="search"]::-webkit-search-cancel-button {
     -webkit-backdrop-filter: blur(20px);
     backdrop-filter: blur(20px);
     height: 100svh;
-    overflow-y: auto;
+    /* only the details scroll; the Close bar and the actions stay put */
+    overflow: hidden;
 }
 
 .lb-top {
@@ -1260,11 +1262,25 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .lb-body {
-    flex: 1;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
     display: flex;
     flex-direction: column;
-    justify-content: center;
+    justify-content: safe center;
     gap: 28px;
+    padding-block: 14px;
+    /* soft edges where the details scroll under the bar and the actions */
+    -webkit-mask-image: linear-gradient(transparent, #000 14px, #000 calc(100% - 14px), transparent);
+    mask-image: linear-gradient(transparent, #000 14px, #000 calc(100% - 14px), transparent);
+}
+
+.lb-top,
+.lb-actions,
+.lb-hint {
+    flex: none;
 }
 
 .lb-title {
@@ -1333,9 +1349,44 @@ input[type="search"]::-webkit-search-cancel-button {
     box-shadow: 0 0 0 1px var(--line);
 }
 
+/* Download across the top, the two quieter actions side by side below */
 .lb-actions {
     display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
     gap: 8px;
+}
+
+#lb-download {
+    grid-column: 1 / -1;
+}
+
+.lb-actions .btn {
+    min-height: 48px;
+    padding: 12px 20px;
+    gap: 12px;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+/* long board names give way before the button does */
+.lb-actions .btn > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* "Unsplash ↗" is enough on screen; screen readers still hear "View on Unsplash" */
+#lb-open .lb-long {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+}
+
+#lb-download.btn {
+    min-height: 56px;
+    font-size: 15px;
 }
 
 .btn {
@@ -1373,35 +1424,130 @@ input[type="search"]::-webkit-search-cancel-button {
     will-change: transform, opacity;
 }
 
-@media (max-width: 860px) {
+/* Small screens (phones either way up, short windows): the panel scrolls,
+   so its top bar (counter + Close) and the actions stay pinned to its
+   edges instead of scrolling out of reach. Breakpoints are mirrored by
+   lbStacked() / lbCompact() in api.js. */
+@media (max-width: 860px), (max-height: 640px) {
+    .lb-panel {
+        --pad: var(--gutter);
+        gap: 18px;
+        padding: 0 var(--pad);
+        background: var(--bg-2);
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
+    .lb-top {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        margin: 0 calc(var(--pad) * -1);
+        padding: 10px var(--pad);
+        background: var(--bg-2);
+        border-bottom: 1px solid var(--line);
+    }
+
+    .lb-close {
+        min-height: 44px;
+        padding: 0 18px;
+    }
+
+    .lb-body {
+        flex: none;
+        overflow: visible;
+        padding-block: 0;
+        -webkit-mask-image: none;
+        mask-image: none;
+        justify-content: flex-start;
+        gap: 18px;
+    }
+
+    .lb-title {
+        font-size: clamp(26px, 7vw, 34px);
+    }
+
+    .lb-more {
+        margin-top: 4px;
+    }
+
+    .lb-actions {
+        position: sticky;
+        bottom: 0;
+        z-index: 2;
+        margin: auto calc(var(--pad) * -1) 0;
+        padding: 10px var(--pad) max(10px, env(safe-area-inset-bottom));
+        background: var(--bg-2);
+        border-top: 1px solid var(--line);
+        grid-template-columns: 1fr 1fr;
+    }
+
+    #lb-download {
+        grid-column: 1 / -1;
+    }
+
+    .lb-actions .btn,
+    #lb-download.btn {
+        min-height: 44px;
+        padding: 10px 18px;
+        font-size: 14px;
+    }
+
+    .lb-long {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+    }
+
+    .lb-hint {
+        display: none;
+    }
+}
+
+/* Phones held upright: photo on top, panel below. One row of actions. */
+@media (max-width: 860px) and (min-height: 521px), (max-width: 560px) {
     .lightbox {
         grid-template-columns: 1fr;
-        grid-template-rows: 58svh 1fr;
+        grid-template-rows: 54svh minmax(0, 1fr);
     }
 
     .lb-stage {
-        height: 58svh;
+        height: 54svh;
     }
 
     .lb-panel {
         height: auto;
         min-height: 0;
-        background: var(--bg-2);
-        -webkit-backdrop-filter: none;
-        backdrop-filter: none;
         border-left: 0;
         border-top: 1px solid var(--line);
-        gap: 18px;
     }
 
-    .lb-body {
-        justify-content: flex-start;
-        gap: 18px;
+    .lb-actions {
+        grid-template-columns: 1.2fr 1fr 1fr;
+        gap: 6px;
     }
 
+    #lb-download {
+        grid-column: auto;
+    }
 
-    .lb-hint {
-        display: none;
+    .lb-actions .btn {
+        justify-content: center;
+        gap: 8px;
+        padding: 10px 12px;
+        white-space: nowrap;
+    }
+}
+
+/* Phones on their side: keep photo and panel side by side. */
+@media (max-width: 860px) and (max-height: 520px) and (min-width: 561px) {
+    .lightbox {
+        grid-template-columns: 1fr minmax(280px, 42vw);
     }
 }
 
@@ -2314,9 +2460,106 @@ input[type="search"]::-webkit-search-cancel-button {
     align-items: center;
 }
 
-@media (max-width: 760px) {
+/* thin rules between the toolbar's groups: view · edit · look · send · leave */
+.pb-sep {
+    flex: none;
+    align-self: center;
+    width: 1px;
+    height: 22px;
+    margin: 0 4px;
+    background: var(--line);
+}
+
+.pb-tools > .pb-more {
+    display: none;
+}
+
+/* view-only boards lose the edit tools, which would leave rules side by side */
+.pb.is-readonly .pb-sep {
+    display: none;
+}
+
+/* the shortcut line is for keyboards; it only crowds tablets and phones */
+@media (max-width: 1100px), (pointer: coarse) {
     .pb-hint {
         display: none;
+    }
+}
+
+/* Below 1180px the full toolbar no longer fits on one line. Rather than wrap
+   or scroll sideways, the everyday tools stay in one row and the rest fold
+   behind ⋯. Phones keep .pb-main (Add, Undo, Find, ⋯, Wall); tablets also
+   keep .pb-wide (Group, Tidy, Palette, Share). */
+@media (max-width: 1180px) {
+    .pb-tools {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .pb-tools > .pb-more {
+        display: grid;
+        place-items: center;
+        min-width: 44px;
+        align-self: stretch;
+        min-height: 40px;
+        padding: 0;
+        margin-left: auto;
+        font-size: 18px;
+        line-height: 1;
+    }
+
+    .pb-tools.is-more > .pb-more {
+        background: var(--paper);
+        border-color: var(--paper);
+        color: var(--bg);
+    }
+
+    .pb-sep,
+    .pb-tools:not(.is-more) > :not(.pb-main):not(.pb-wide) {
+        display: none;
+    }
+
+    /* the folded tools come in below a rule, after the everyday row */
+    .pb-tools > :not(.pb-main):not(.pb-wide) {
+        order: 2;
+    }
+
+    .pb-tools.is-more::after {
+        content: "";
+        order: 1;
+        flex-basis: 100%;
+        height: 1px;
+        margin: 2px 0;
+        background: var(--line);
+    }
+}
+
+@media (max-width: 760px) {
+    .pb-head {
+        gap: 12px;
+        padding-bottom: 8px;
+    }
+
+    .pb-tools {
+        gap: 6px;
+    }
+
+    .pb-tools:not(.is-more) > .pb-wide {
+        display: none;
+    }
+
+    .pb-tools > .pb-wide {
+        order: 2;
+    }
+
+    .pb-tools > button {
+        min-height: 44px;
+        padding: 0 14px;
+    }
+
+    .pb-tools .cv-zoom button {
+        min-width: 44px;
+        min-height: 44px;
     }
 }
 
@@ -2977,6 +3220,11 @@ input[type="search"]::-webkit-search-cancel-button {
 .cv.is-board #cv-gl {
     filter: blur(14px) saturate(1.2) brightness(0.9);
     scale: 1.04;
+}
+
+/* behind the blurred wall: never let the page under the canvas show through */
+.cv.is-board {
+    background: var(--bg);
 }
 
 .cv.is-board .cv-bar,
@@ -3669,22 +3917,6 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 @media (max-width: 760px) {
-    .pb-tools {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        max-width: 100%;
-        padding-bottom: 4px;
-        scrollbar-width: none;
-    }
-
-    .pb-tools::-webkit-scrollbar {
-        display: none;
-    }
-
-    .pb-tools > * {
-        flex: none;
-    }
-
     .pb-minimap {
         width: 140px;
         height: 90px;
@@ -3815,7 +4047,13 @@ input[type="search"]::-webkit-search-cancel-button {
     filter: drop-shadow(0 3px 2px rgba(0, 0, 0, 0.45));
     transform-box: fill-box;
     transform-origin: center;
-    transition: scale 0.25s var(--ease-out);
+    /* reappearing after a drop waits for the card's 0.4s settle */
+    transition: scale 0.25s var(--ease-out), opacity 0.15s 0.4s;
+}
+
+.pb-pinhead.is-lifted {
+    opacity: 0;
+    transition: scale 0.25s var(--ease-out), opacity 0s;
 }
 
 .pb-pinhead.is-hover,

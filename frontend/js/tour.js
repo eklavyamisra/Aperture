@@ -104,7 +104,9 @@
     function place() {
         if (!tip || tip.hidden) return;
         const step = STEPS[i];
-        const el = step.target();
+        let el = step.target();
+        // on phones Group and Share fold behind ⋯: point at that instead
+        if (!visible(el) && el?.closest(".pb-tools")) el = document.querySelector("#pb-more");
         const vw = innerWidth;
         const vh = innerHeight;
         const tw = tip.offsetWidth;

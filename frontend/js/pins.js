@@ -514,7 +514,11 @@
         const on = !!p && has(p.id);
         lbPin.setAttribute("aria-pressed", on);
         lbPin.classList.toggle("is-on", on);
-        lbPin.firstElementChild.textContent = on ? `Pinned to ${B.name}` : `Pin to ${B.name}`;
+        // "Pin" stays visible; " to <board>" folds away on phones (.lb-long)
+        const long = document.createElement("span");
+        long.className = "lb-long";
+        long.textContent = ` to ${B.name}`;
+        lbPin.firstElementChild.replaceChildren(on ? "Pinned" : "Pin", long);
         lbPin.disabled = readonly;
         lbPin.dataset.cursor = on ? "Unpin" : "Pin";
     }
@@ -1068,6 +1072,7 @@
         if (!c) {
             c = document.createElementNS(SVG, "circle");
             c.setAttribute("class", "pb-pinhead");
+            if (cardEl(id)?.classList.contains("is-held")) c.classList.add("is-lifted");
             c.setAttribute("r", "8");
             c.dataset.id = id;
             headsLayer.appendChild(c);
@@ -1077,6 +1082,10 @@
         c.setAttribute("cy", p[1].toFixed(1));
     }
     const headFor = (id) => heads.get(id);
+    // A held card grows and tilts (CSS), then eases back when dropped, which the
+    // copy can't follow exactly: hide it meanwhile so there's never a second pin
+    // beside the real one (it fades back once the card has settled, see CSS).
+    const liftHead = (id, on) => heads.get(id)?.classList.toggle("is-lifted", on);
 
     function threadEl(k) {
         let te = threadEls.get(k);
@@ -1937,6 +1946,7 @@
                 m.el.style.removeProperty("--tilt");
                 m.el.classList.remove("is-held", "is-carried");
             }
+            liftHead(m.id, false);
             const g = geo.get(m.id);
             if (g) {
                 g.l = m.left + d.tx;
@@ -2042,6 +2052,7 @@
             card.setPointerCapture(e.pointerId);
             card.style.zIndex = ++top;
             card.classList.add("is-held");
+            liftHead(id, true);
             const g = geo.get(id);
             const group = [...sel]
                 .filter((o) => o !== id && geo.get(o))
@@ -2388,6 +2399,7 @@
                 if (!tray.hidden) return closeTray(true);
                 if (clearSel()) return announce("Selection cleared");
                 if (closeFind(false)) return;
+                if (moreOpen()) return setMore(false) && moreBtn.focus({ preventScroll: true });
                 return closeBoard();
             }
             if (mod && key === "f") {
@@ -2867,6 +2879,20 @@
     q("#pb-find-close").addEventListener("click", () => closeFind(true));
     findBtn.addEventListener("click", () => (find.hidden ? openFind() : closeFind(true)));
 
+    /* ---------- phones: the less-used tools fold behind ⋯ (CSS does the hiding) ---------- */
+    const tools = q("#pb-tools");
+    const moreBtn = q("#pb-more");
+    const moreOpen = () => tools.classList.contains("is-more");
+    function setMore(open) {
+        tools.classList.toggle("is-more", open);
+        moreBtn.setAttribute("aria-expanded", String(open));
+        moreBtn.setAttribute("aria-label", open ? "Fewer tools" : "More tools");
+        return true;
+    }
+    moreBtn.addEventListener("click", () => setMore(!moreOpen()));
+    // one-shot tools fold the row away again; menus and zoom leave it open
+    ["#pb-fit", "#pb-frame", "#pb-tidy"].forEach((s) => q(s).addEventListener("click", () => moreOpen() && setMore(false)));
+
     /* ---------- minimap ---------- */
     const MM_W = 200;
     const MM_H = 128;
@@ -3086,6 +3112,7 @@
         closeLinkbox(false);
         closeFind(false);
         closeTray(false);
+        setMore(false);
         cancelThreadFrom();
         const done = () => {
             board.hidden = true;

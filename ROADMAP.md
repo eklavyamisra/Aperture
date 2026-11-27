@@ -71,6 +71,7 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 | 29 | First-run walkthrough on the board | ✅ | `frontend/js/tour.js`; `?` replays it. |
 | 30 | Automated tests in CI | ✅ | `npm test`; GitHub Actions on push and PRs. |
 | 31 | Accessibility audit | 🟡 | Automated axe scan passes (no serious/critical issues). Not yet checked with a real screen reader. |
+| 32 | Layout pass: photo viewer, board toolbar, home search, board backdrop | ✅ | Tied pins no longer show a second pin while a card is lifted; the board keeps its blurred-wall backdrop after a window resize (it used to go see-through to the page below). `tests/threads.spec.js`. Board toolbar no longer scrolls sideways on phones: everyday tools (Add, Undo, Find, Wall) in one row, the rest behind ⋯ (tablets keep Group, Tidy, Palette, Share in the row too); one grouped row with dividers from 1180px up. The viewer's Close bar and actions never scroll out of reach on any screen (only the details scroll); Download full width with Unsplash and Pin side by side; side-by-side panel on phones held sideways; home photos no longer cover the search field. `tests/mobile.spec.js`. |
 
 ## Decisions only the owner can make
 

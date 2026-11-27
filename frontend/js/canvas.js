@@ -594,7 +594,16 @@
         glc.height = Math.round(innerHeight * dpr);
         gl.viewport(0, 0, glc.width, glc.height);
     }
-    window.addEventListener("resize", () => cv.isOpen && resize());
+    window.addEventListener("resize", () => {
+        if (!cv.isOpen) return;
+        resize(); // this clears the canvas
+        // under the board the loop has stopped: draw once so the blurred wall comes back
+        // (frame() stops itself again when nothing is moving)
+        if (paused && !raf) {
+            lastT = 0;
+            raf = requestAnimationFrame(frame);
+        }
+    });
 
     function setCursor(label) {
         if (!canHover || reduceMotion) return;

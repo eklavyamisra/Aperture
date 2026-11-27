@@ -597,12 +597,18 @@ qa("[data-density]").forEach((b) =>
 ---------------------------------------------------------- */
 const lb = { i: -1, hidden: null, lastFocus: null, busy: false };
 
+// keep these in step with the lightbox media queries in style.css
+// photo above, panel below (phones held upright)
+const lbStacked = () => matchMedia("(max-width: 860px) and (min-height: 521px), (max-width: 560px)").matches;
+// small screens: tighter margins around the photo (phones either way up, short windows)
+const lbCompact = () => matchMedia("(max-width: 860px), (max-height: 640px)").matches;
+
 function fitRect(p) {
     const s = lbStage.getBoundingClientRect();
-    const mobile = innerWidth < 860;
-    const px = mobile ? 16 : 48;
-    const pt = mobile ? 16 : 48;
-    const pb = mobile ? 16 : 48;
+    const pad = lbCompact() ? 16 : 48;
+    const px = pad;
+    const pt = pad;
+    const pb = pad;
     const aw = s.width - px * 2;
     const ah = s.height - pt - pb;
     const scale = Math.min(aw / p.width, ah / p.height);
@@ -700,7 +706,7 @@ function openLightbox(i, fromRect) {
     const to = fitRect(p);
     if (!inCanvas()) hideCard(i);
 
-    const mobile = innerWidth < 860;
+    const mobile = lbStacked();
     const tl = gsap.timeline({
         defaults: { ease: "expo.inOut" },
         onComplete: () => {
@@ -727,7 +733,7 @@ function closeLightbox() {
     const media = canvasOpen ? null : state.cards[lb.i]?.querySelector(".card-media");
     const r = canvasOpen ? window.canvasView.rectFor(lb.i) : media?.getBoundingClientRect();
     const onScreen = r && r.bottom > 0 && r.top < innerHeight;
-    const mobile = innerWidth < 860;
+    const mobile = lbStacked();
 
     const done = () => {
         lightbox.hidden = true;
