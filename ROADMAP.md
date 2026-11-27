@@ -1,0 +1,83 @@
+# Aperture roadmap
+
+Four phases (0–3) plus a track that runs alongside all of them. Status as of 26 November 2026.
+
+**Legend:** ✅ done · 🟡 partly done · ⏸ waiting on a decision · ⬜ not started
+
+| Phase | Theme | Status |
+|---|---|---|
+| 0 | Fix before more users arrive | ✅ 4 of 5 (approval left until needed) |
+| 1 | Make the board useful without Unsplash | ✅ 9 of 9 |
+| 2 | Accounts and the cloud (paid tier starts here) | 🟡 3 of 6 built (Supabase); needs your Supabase project to go live |
+| 3 | Teams and money | ⬜ |
+| Alongside | Growth and quality | 🟡 3 of 5 |
+
+## Phase 0: Fix before more users arrive
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 1 | Unsplash production approval (50 → 5,000 requests/hour) | ⏸ | Owner will apply when needed. Until then the demo key's 50/hour is the main scaling limit. |
+| 2 | Report an Unsplash download for each photo in a PNG export | ✅ | One API request per photo. |
+| 3 | Error monitoring | ✅ | Own endpoint instead of Sentry: `frontend/js/errors.js` → `backend/api/log.js` → Vercel logs (`[client-error]`). |
+| 4 | Warn before browser storage fills up | ✅ | Toast plus an error report. |
+| 5 | Privacy policy and terms | ✅ | `/privacy`, `/terms`. Plain language, not legal advice; contact is GitHub issues; no governing-law clause yet. |
+
+## Phase 1: Make the board useful without Unsplash
+
+| # | Item | Status |
+|---|---|---|
+| 6 | Upload your own images (drop, paste, file picker) | ✅ |
+| 7 | Paste a link to an image or page (image card or bookmark card) | ✅ |
+| 8 | Notes on the board | ✅ |
+| 9 | Drag photos from the wall onto the board (tray, `W`) | ✅ |
+| 10 | Multi-select, align, distribute, group, delete | ✅ |
+| 11 | Snap to other cards while dragging | ✅ |
+| 12 | Minimap and find within a board | ✅ |
+| 13 | Colour palette from a board's photos | ✅ |
+| 14 | Touch: long-press menus as bottom sheets, bigger handles | ✅ |
+
+## Phase 2: Accounts and the cloud
+
+**Backend chosen: Supabase.** Sign-in by email magic link and Google. Boards already on a device move into the account on first sign-in. Setup steps: README → *Accounts (Supabase)*.
+
+| # | Item | Size | Status |
+|---|---|---|---|
+| 15 | Accounts (email magic link or Google) | M | ✅ built; live once Supabase is set up |
+| 16 | Cloud sync of boards across devices | L | ✅ built (newest edit wins per board; offline-first) |
+| 17 | Image storage for uploads | M | ✅ built (private bucket per user) |
+| 18 | Shared boards with real link previews (short URLs) | M | ⬜ |
+| 19 | Private and password-protected share links | S | ⬜ |
+| 20 | Comments on shared boards | M | ⬜ |
+
+## Phase 3: Teams and money
+
+| # | Item | Size | Status |
+|---|---|---|---|
+| 21 | Real-time collaboration (live cursors, editing together) | L | ⬜ |
+| 22 | Presentation mode (walk through groups like slides) | M | ⬜ |
+| 23 | PDF export | M | ⬜ |
+| 24 | Team workspaces and roles | M | ⬜ |
+| 25 | Billing with Stripe (free / pro / team) | M | ⬜ |
+| 26 | Board templates for a chosen niche | S | ⬜ |
+
+## Alongside: growth and quality
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 27 | Landing page with a waitlist | ⬜ | Validates demand before Phase 2's cost. Needs somewhere to store emails. |
+| 28 | Privacy-friendly analytics (e.g. Plausible) | ⬜ | Would need a line in the privacy page. |
+| 29 | First-run walkthrough on the board | ✅ | `frontend/js/tour.js`; `?` replays it. |
+| 30 | Automated tests in CI | ✅ | `npm test`; GitHub Actions on push and PRs. |
+| 31 | Accessibility audit | 🟡 | Automated axe scan passes (no serious/critical issues). Not yet checked with a real screen reader. |
+
+## Decisions only the owner can make
+
+- **Niche.** Who it's for. Drives templates (#26), the landing page and pricing.
+- ~~**Backend.**~~ Decided: Supabase.
+- **Pricing.** Suggested split: free for local boards; paid for cloud sync and collaboration.
+
+## Suggested next steps
+
+1. Create the Supabase project and Google sign-in (README), so #15–17 go live. Follow-ups: full account deletion from inside the app (needs a server key), and live updates instead of the 45 s sync check.
+2. #27 landing page and waitlist (can share the same backend for storing emails).
+3. #22 presentation mode and #23 PDF export are client-only and can be done any time.

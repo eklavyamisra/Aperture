@@ -1,5 +1,5 @@
 // The first-run walkthrough on the board.
-import { test, expect, openGrid } from "./fixtures.js";
+import { test, expect, openGrid, openBoard } from "./fixtures.js";
 
 test("tour: shows once on first open, steps through, ? replays it", async ({ page }) => {
     await openGrid(page);
@@ -8,8 +8,7 @@ test("tour: shows once on first open, steps through, ? replays it", async ({ pag
         localStorage.removeItem("aperture:tour");
         state.photos.slice(0, 3).forEach((p) => window.pins.toggle(p));
     });
-    await page.evaluate(() => window.pins.openBoard());
-    await page.waitForSelector("#pb:not([hidden])");
+    await openBoard(page);
 
     const tour = page.locator(".tour");
     await expect(tour).toBeVisible({ timeout: 5000 });
@@ -38,8 +37,7 @@ test("tour: shows once on first open, steps through, ? replays it", async ({ pag
     // reopening the board doesn't show it again
     await page.locator("#pb-close").click();
     await page.waitForSelector("#pb", { state: "hidden" });
-    await page.evaluate(() => window.pins.openBoard());
-    await page.waitForSelector("#pb:not([hidden])");
+    await openBoard(page);
     await page.waitForTimeout(1600);
     await expect(tour).toBeHidden();
 
@@ -55,8 +53,7 @@ test("tour: shows once on first open, steps through, ? replays it", async ({ pag
 test("tour: never shows on a shared, view-only board", async ({ page, freshPage }) => {
     await openGrid(page);
     await page.evaluate(() => state.photos.slice(0, 2).forEach((p) => window.pins.toggle(p)));
-    await page.evaluate(() => window.pins.openBoard());
-    await page.waitForSelector("#pb:not([hidden])");
+    await openBoard(page);
     await page.locator("#pb-share").click();
     await page.waitForTimeout(500);
     const url = await page.evaluate(() => navigator.clipboard.readText());

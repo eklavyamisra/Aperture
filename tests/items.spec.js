@@ -174,13 +174,7 @@ test("items: add every kind of item and use the board tools", async ({ page, fre
     });
 
     await test.step("right-click menu, and long-press opens a bottom sheet", async () => {
-        const img = await page.locator(".pb-card.is-unsplash img").first().boundingBox();
-        await page.mouse.click(img.x + 30, img.y + 30, { button: "right" });
-        await expect(page.locator("#pb-ctx")).toBeVisible();
-        await page.keyboard.press("Escape");
-        await expect(page.locator("#pb-ctx")).toBeHidden();
-        await expect(page.locator("#pb")).toBeVisible();
-
+        // the minimap click above moved the view: frame everything, then use a card nothing covers
         await page.locator("#pb-fit").click();
         await wait(900);
         const at = await page.evaluate(() => {
@@ -194,6 +188,12 @@ test("items: add every kind of item and use the board tools", async ({ page, fre
             return null;
         });
         expect(at).not.toBeNull();
+        await page.mouse.click(at.x, at.y, { button: "right" });
+        await expect(page.locator("#pb-ctx")).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(page.locator("#pb-ctx")).toBeHidden();
+        await expect(page.locator("#pb")).toBeVisible();
+
         const cdp = await page.context().newCDPSession(page);
         // hold until the sheet is up (a busy machine can run the timer late), then lift:
         // lifting the finger must not tap whichever menu item appeared under it

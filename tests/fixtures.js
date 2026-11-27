@@ -17,8 +17,18 @@ function recordBeacons() {
     };
 }
 
+// Without a GPU (CI), Chromium paints every blur and backdrop blur in software
+// on each frame, which makes the board crawl. They're decoration only.
+function dropBlurs() {
+    const css = "*,*::before,*::after{filter:none!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}";
+    const add = () => document.head.append(Object.assign(document.createElement("style"), { textContent: css }));
+    if (document.head) add();
+    else document.addEventListener("DOMContentLoaded", add, { once: true });
+}
+
 export async function prepare(context) {
     await context.addInitScript(recordBeacons);
+    if (process.env.CI || process.env.SOFTWARE_GL) await context.addInitScript(dropBlurs);
     return mockUnsplash(context);
 }
 
@@ -70,16 +80,17 @@ export const openCanvas = async (page, query = "") => {
     await page.waitForFunction(() => window.canvasView?.isOpen && state.photos.length > 5, null, { timeout: 30000 });
 };
 
-// the board and its tools don't need the WebGL wall: open it over the grid,
-// which keeps the slow software-GL runners on CI out of these tests
 export const openGrid = async (page, query = "") => {
     await page.goto(`/${query}`);
     await page.waitForFunction(() => window.pins && state.photos.length > 5 && !state.loading, null, { timeout: 30000 });
 };
 
+// the board lives on the canvas view: open that first if we're on the grid
 export const openBoard = async (page) => {
+    await page.evaluate(() => window.canvasView.isOpen || window.canvasView.open());
+    await page.waitForFunction(() => window.canvasView.isOpen, null, { timeout: 30000 });
     await page.evaluate(() => window.pins.openBoard());
-    await page.waitForSelector("#pb:not([hidden])");
+    await page.waitForSelector("#pb:not([hidden])", { timeout: 30000 });
     await page.waitForTimeout(1200);
 };
 

@@ -15,13 +15,16 @@ async function scan(page, info, name, include) {
 
 test("a11y: search grid", async ({ page }, info) => {
     await openGrid(page, "?q=coast");
-    await page.waitForTimeout(800);
+    // the intro fades the hero text in from transparent: scan once it has landed,
+    // or axe measures contrast mid-fade
+    await page.waitForFunction(() => [...document.querySelectorAll(".hero-meta > *, .search--hero > *, #nav > *")].every((el) => getComputedStyle(el).opacity === "1"), null, { timeout: 15000 });
     await scan(page, info, "grid");
 });
 
 test("a11y: photo viewer", async ({ page }, info) => {
     await openGrid(page, "?q=coast");
-    await page.evaluate(() => openLightbox(0));
+    // check and open in one step: the grid can swap its cards between two separate calls
+    await page.waitForFunction(() => state.cards?.[0]?.isConnected && state.photos[0] && (openLightbox(0), true), null, { timeout: 15000 });
     await page.waitForFunction(() => !lb.busy, null, { timeout: 5000 });
     await scan(page, info, "viewer", "#lightbox");
 });
@@ -45,6 +48,18 @@ test("a11y: board, menu and walkthrough", async ({ page }, info) => {
     await page.keyboard.press("?");
     await expect(page.locator(".tour")).toBeVisible();
     await scan(page, info, "tour", ".tour");
+});
+
+test("a11y: account dialog", async ({ page }, info) => {
+    // a backend that is configured but signed out, so the sign-in form shows
+    await page.addInitScript(() => {
+        window.__apertureBackend = { session: async () => null, onChange() {}, signOut: async () => {} };
+    });
+    await openGrid(page);
+    await openBoard(page);
+    await page.locator("#pb-account").click();
+    await expect(page.locator("#acct-email")).toBeFocused();
+    await scan(page, info, "account", "#acct");
 });
 
 for (const path of ["/privacy", "/terms"]) {

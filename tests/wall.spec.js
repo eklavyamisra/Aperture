@@ -31,14 +31,16 @@ test("viewer: Like this, By photographer, and the shape filter", async ({ page }
     await page.goto("/?q=forest");
     await page.waitForFunction(() => state.mode === "search" && !state.loading && state.photos.length > 0, null, { timeout: 30000 });
 
-    await page.evaluate(() => openLightbox(0));
+    // check and open in one step: the grid can swap its cards between two separate calls
+    await page.waitForFunction(() => state.cards?.[0]?.isConnected && state.photos[0] && (openLightbox(0), true), null, { timeout: 15000 });
     await page.waitForFunction(() => !lb.busy, null, { timeout: 5000 });
     const hint = await page.locator("#lb-similar").getAttribute("title");
     await page.locator("#lb-similar").click();
     await page.waitForFunction(() => lightbox.hidden && state.query !== "forest" && !state.loading && state.photos.length > 0, null, { timeout: 20000 });
     expect(hint).toContain(await page.evaluate(() => state.query));
 
-    await page.evaluate(() => openLightbox(0));
+    // check and open in one step: the grid can swap its cards between two separate calls
+    await page.waitForFunction(() => state.cards?.[0]?.isConnected && state.photos[0] && (openLightbox(0), true), null, { timeout: 15000 });
     await page.waitForFunction(() => !lb.busy, null, { timeout: 5000 });
     const username = await page.evaluate(() => state.photos[0].user.username);
     const token = await page.evaluate(() => state.token);
@@ -57,10 +59,22 @@ test("viewer: Like this, By photographer, and the shape filter", async ({ page }
     expect(await page.evaluate(() => state.photos.every((p) => p.height > p.width))).toBe(true);
 });
 
-test("legal pages are served", async ({ request }) => {
+test("legal pages are served, with their styles; old asset URLs redirect", async ({ request, page }) => {
     for (const path of ["/privacy", "/terms"]) {
         const r = await request.get(path);
         expect(r.status()).toBe(200);
         expect(await r.text()).toContain("<h1>");
+    }
+    // the short URL still loads /css/legal.css and the icon (absolute paths)
+    const failed = [];
+    page.on("response", (r) => r.status() >= 400 && failed.push(`${r.status()} ${r.url()}`));
+    await page.goto("/privacy");
+    expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe("rgb(13, 12, 10)");
+    expect(failed).toEqual([]);
+    // link previews and bookmarks cached the old root paths
+    for (const [from, type] of [["/og.jpg", "image/jpeg"], ["/favicon.svg", "image/svg+xml"]]) {
+        const r = await request.get(from);
+        expect(r.status(), from).toBe(200);
+        expect(r.headers()["content-type"]).toContain(type);
     }
 });

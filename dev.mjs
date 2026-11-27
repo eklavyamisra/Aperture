@@ -1,4 +1,4 @@
-// Local dev server: serves public/ and runs api/unsplash.js like Vercel does.
+// Local dev server: serves frontend/ and runs the functions in backend/api/ like Vercel does.
 //   node dev.mjs            -> http://localhost:5173
 // Reads UNSPLASH_ACCESS_KEY from .env.local. Caches API responses in memory
 // so reloading while you work doesn't eat the rate limit.
@@ -6,10 +6,11 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
-import { GET } from "./api/unsplash.js";
-import { POST as logPOST } from "./api/log.js";
+import { GET } from "./backend/api/unsplash.js";
+import { POST as logPOST } from "./backend/api/log.js";
+import { GET as configGET } from "./backend/api/config.js";
 
-const root = new URL("./public/", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
+const root = new URL("./frontend/", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
 const PORT = +process.env.PORT || 5173;
 
 if (existsSync(".env.local")) {
@@ -33,6 +34,11 @@ const TYPES = {
 
 const cache = new Map();
 
+// the same exact-path rewrites and redirects Vercel applies (vercel.json)
+const vercel = JSON.parse(readFileSync(new URL("./vercel.json", import.meta.url), "utf8"));
+const rewrites = new Map((vercel.rewrites || []).map((r) => [r.source, r.destination]));
+const redirects = new Map((vercel.redirects || []).map((r) => [r.source, r.destination]));
+
 createServer(async (req, res) => {
     const url = new URL(req.url, `http://localhost:${PORT}`);
 
@@ -42,6 +48,12 @@ createServer(async (req, res) => {
         const r = await logPOST(new Request(url, { method: "POST", body: Buffer.concat(chunks) }));
         res.writeHead(r.status);
         return res.end();
+    }
+
+    if (url.pathname === "/api/config") {
+        const r = await configGET(new Request(url));
+        res.writeHead(r.status, Object.fromEntries(r.headers));
+        return res.end(await r.text());
     }
 
     if (url.pathname === "/api/unsplash") {
@@ -58,7 +70,12 @@ createServer(async (req, res) => {
         return res.end(body);
     }
 
-    let p = normalize(decodeURIComponent(url.pathname)).replace(/^[\\/]+/, "");
+    if (redirects.has(url.pathname)) {
+        res.writeHead(308, { location: redirects.get(url.pathname) });
+        return res.end();
+    }
+    const pathname = rewrites.get(url.pathname) || url.pathname;
+    let p = normalize(decodeURIComponent(pathname)).replace(/^[\\/]+/, "");
     if (!p || p.endsWith("/") || p.endsWith("\\")) p += "index.html";
     if (!extname(p)) p += ".html";
     const file = join(root, p);

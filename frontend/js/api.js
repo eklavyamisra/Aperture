@@ -1,4 +1,4 @@
-// All Unsplash calls go through /api/unsplash (see api/unsplash.js): the key
+// All Unsplash calls go through /api/unsplash (see backend/api/unsplash.js): the key
 // stays on the server and the CDN caches responses.
 const PROXY = "/api/unsplash";
 const UTM = "utm_source=aperture&utm_medium=referral";

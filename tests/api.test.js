@@ -1,8 +1,9 @@
 // Unit tests for the two serverless functions (run with `node --test`).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GET } from "../api/unsplash.js";
-import { POST } from "../api/log.js";
+import { GET } from "../backend/api/unsplash.js";
+import { POST } from "../backend/api/log.js";
+import { GET as config } from "../backend/api/config.js";
 
 /* ---------- api/unsplash.js ---------- */
 
@@ -101,4 +102,35 @@ test("log: rejects bad bodies without logging", async () => {
         assert.equal(status, code, body.slice(0, 20));
         assert.equal(lines.length, 0);
     }
+});
+
+/* ---------- api/config.js ---------- */
+
+async function cfg(env) {
+    const keep = { url: process.env.SUPABASE_URL, key: process.env.SUPABASE_ANON_KEY };
+    for (const [k, v] of Object.entries(env)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+    }
+    try {
+        const r = await config(new Request("http://localhost/api/config"));
+        return r.json();
+    } finally {
+        if (keep.url === undefined) delete process.env.SUPABASE_URL;
+        else process.env.SUPABASE_URL = keep.url;
+        if (keep.key === undefined) delete process.env.SUPABASE_ANON_KEY;
+        else process.env.SUPABASE_ANON_KEY = keep.key;
+    }
+}
+
+test("config: empty until Supabase is set, then only the public settings", async () => {
+    assert.deepEqual(await cfg({ SUPABASE_URL: undefined, SUPABASE_ANON_KEY: undefined }), {});
+    const anon = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.public-anon";
+    assert.deepEqual(await cfg({ SUPABASE_URL: "https://abcd1234.supabase.co/", SUPABASE_ANON_KEY: anon, SUPABASE_SERVICE_ROLE_KEY: "secret" }), {
+        supabase: { url: "https://abcd1234.supabase.co", anonKey: anon },
+    });
+    // anything that isn't a Supabase project URL is ignored
+    assert.deepEqual(await cfg({ SUPABASE_URL: "https://evil.example.com", SUPABASE_ANON_KEY: anon }), {});
+    assert.deepEqual(await cfg({ SUPABASE_URL: "http://abcd1234.supabase.co", SUPABASE_ANON_KEY: anon }), {});
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 });

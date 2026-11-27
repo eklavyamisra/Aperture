@@ -218,3 +218,64 @@ test("board: build, edit, export and share a board", async ({ page, freshPage },
         expect(await p2.evaluate(() => JSON.parse(localStorage.getItem("aperture:boards")).list.length)).toBe(2);
     });
 });
+
+test("board: long credits stay inside their card", async ({ page }) => {
+    const { openGrid } = await import("./fixtures.js");
+    await openGrid(page);
+    await page.evaluate(() => {
+        const p = structuredClone(state.photos[0]);
+        p.user.name = "Maximiliana Alexandrovna Konstantinopolskaya-Ivanova";
+        window.pins.toggle(p);
+    });
+    await openBoard(page);
+    const spill = await page.evaluate(() =>
+        [...document.querySelectorAll(".pb-card")].flatMap((card) => {
+            const c = card.getBoundingClientRect();
+            return [...card.querySelectorAll("figcaption *")]
+                .filter((el) => el.getBoundingClientRect().right > c.right + 1)
+                .map((el) => `${el.className || el.tagName}: ${el.textContent.slice(0, 30)}`);
+        })
+    );
+    expect(spill).toEqual([]);
+});
+
+test("board: a card's menu moves with the board when it pans and zooms", async ({ page }) => {
+    const { openGrid } = await import("./fixtures.js");
+    await openGrid(page);
+    await page.evaluate(() => state.photos.slice(0, 3).forEach((p) => window.pins.toggle(p)));
+    await openBoard(page);
+    // card and menu measured in the same frame, once the camera has stopped gliding
+    const measure = async () => {
+        await page.waitForFunction(
+            () =>
+                new Promise((res) => {
+                    const t = () => document.querySelector("#pb-world").style.transform;
+                    const a = t();
+                    setTimeout(() => requestAnimationFrame(() => res(t() === a)), 250);
+                }),
+            null,
+            { timeout: 10000 }
+        );
+        return page.evaluate(() => {
+            const c = document.querySelector(".pb-card img").getBoundingClientRect();
+            const m = document.querySelector("#pb-ctx").getBoundingClientRect();
+            return { c: [c.x, c.y], m: [m.x, m.y] };
+        });
+    };
+    const img = await page.locator(".pb-card img").first().boundingBox();
+    await page.mouse.click(img.x + 40, img.y + 40, { button: "right" });
+    await expect(page.locator("#pb-ctx")).toBeVisible();
+    await page.waitForTimeout(400); // the menu slides in 6 px as it opens
+    const before = await measure();
+
+    // scrolling pans the board; the menu should stay on the card
+    await page.mouse.move(img.x + 300, img.y + 300);
+    await page.mouse.wheel(120, 160);
+    await page.waitForTimeout(300);
+    const after = await measure();
+    await expect(page.locator("#pb-ctx")).toBeVisible();
+    const moved = [after.c[0] - before.c[0], after.c[1] - before.c[1]];
+    expect(Math.abs(moved[0]) + Math.abs(moved[1])).toBeGreaterThan(40);
+    expect(Math.abs(after.m[0] - before.m[0] - moved[0])).toBeLessThan(1);
+    expect(Math.abs(after.m[1] - before.m[1] - moved[1])).toBeLessThan(1);
+});

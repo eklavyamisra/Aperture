@@ -214,7 +214,7 @@
     /* ---------- boards index (+ one-time migration from the single board) ---------- */
     let index = store.get(INDEX);
     if (index && Array.isArray(index.list)) {
-        index.list = index.list.filter((b) => b && ID_RE.test(b.id)).map((b) => ({ id: b.id, name: str(b.name, 60) || "Untitled board" }));
+        index.list = index.list.filter((b) => b && ID_RE.test(b.id)).map((b) => ({ id: b.id, name: str(b.name, 60) || "Untitled board", updated: Math.max(0, Number(b.updated) || 0) }));
     }
     if (!index || !Array.isArray(index.list) || !index.list.length) {
         const id = uid();
@@ -224,7 +224,8 @@
             if (v) store.set(vkey(id), v);
             Object.values(LEGACY).forEach(store.del);
         }
-        index = { active: id, list: [{ id, name: first.name }] };
+        // a migrated board counts as edited; a brand-new empty one doesn't (cloud sync skips it)
+        index = { active: id, list: [{ id, name: first.name, updated: first.pins.length ? Date.now() : 0 }] };
         store.set(INDEX, index);
     }
     if (!index.list.some((b) => b.id === index.active)) index.active = index.list[0].id;
@@ -245,15 +246,22 @@
     }
     loadActive();
 
+    // tell cloud.js a board changed locally (it pushes after a short pause)
+    const changed = (id) => document.dispatchEvent(new CustomEvent("pins:changed", { detail: { id } }));
+
     function persist() {
         if (readonly) return;
-        store.set(bkey(index.active), B);
+        if (!store.set(bkey(index.active), B)) return;
         const meta = index.list.find((b) => b.id === index.active);
-        if (meta && meta.name !== B.name) {
-            meta.name = B.name;
+        if (meta) {
+            meta.updated = Date.now();
+            if (meta.name !== B.name) {
+                meta.name = B.name;
+                syncSwitcher();
+            }
             store.set(INDEX, index);
-            syncSwitcher();
         }
+        changed(index.active);
         checkUsage();
     }
 
@@ -676,7 +684,8 @@
         const id = uid();
         const name = `Board ${index.list.length + 1}`;
         store.set(bkey(id), cleanBoard({ name }));
-        index.list.push({ id, name });
+        index.list.push({ id, name, updated: Date.now() });
+        changed(id);
         switchBoard(id);
         nameInput.focus();
         nameInput.select();
@@ -691,6 +700,7 @@
         store.del(bkey(id));
         store.del(vkey(id));
         switchBoard(index.list[0].id);
+        document.dispatchEvent(new CustomEvent("pins:deleted", { detail: { id, at: Date.now() } }));
     });
 
     nameInput.addEventListener("input", () => {
@@ -761,6 +771,7 @@
         }
         markMoving();
         placePop();
+        placeMenu();
         scheduleMinimap();
         if (readonly) return;
         clearTimeout(viewSaveT);
@@ -1033,6 +1044,35 @@
     const SVG = "http://www.w3.org/2000/svg";
     const threadEls = new Map(); // key -> { g, paths: [hit, shadow, line], kn, label }
 
+    // The strings layer sits above every card, so a thread would lie on top of
+    // its pin. Pins that hold a thread get a copy of their head drawn above the
+    // threads, so each string disappears under the pin it's tied to.
+    const headsLayer = document.createElementNS(SVG, "g");
+    headsLayer.setAttribute("class", "pb-pinheads");
+    strings.insertBefore(headsLayer, tempPath);
+    {
+        const defs = document.createElementNS(SVG, "defs");
+        defs.innerHTML = `<radialGradient id="pb-pinhead-fill" cx="35%" cy="35%" r="65%"><stop offset="0" stop-color="#ffb299"/><stop offset="0.45" stop-color="var(--accent)" style="stop-color: var(--accent)"/><stop offset="1" stop-color="#b8340f"/></radialGradient>`;
+        strings.prepend(defs);
+    }
+    const heads = new Map(); // card id -> circle
+    function placeHead(id) {
+        const p = pinPoint(id);
+        let c = heads.get(id);
+        if (!p) return c?.remove(), heads.delete(id);
+        if (!c) {
+            c = document.createElementNS(SVG, "circle");
+            c.setAttribute("class", "pb-pinhead");
+            c.setAttribute("r", "8");
+            c.dataset.id = id;
+            headsLayer.appendChild(c);
+            heads.set(id, c);
+        }
+        c.setAttribute("cx", p[0].toFixed(1));
+        c.setAttribute("cy", p[1].toFixed(1));
+    }
+    const headFor = (id) => heads.get(id);
+
     function threadEl(k) {
         let te = threadEls.get(k);
         if (te) return te;
@@ -1046,7 +1086,7 @@
             g.appendChild(p);
             return p;
         });
-        strings.insertBefore(g, tempPath);
+        strings.insertBefore(g, headsLayer);
         // the knot: a focusable handle at the middle of the string, showing its label
         const kn = document.createElement("button");
         kn.type = "button";
@@ -1086,6 +1126,7 @@
         if (only != null) {
             const set = new Set(Array.isArray(only) ? only : [only]);
             B.threads.forEach((t) => (set.has(t.a) || set.has(t.b)) && drawThread(t));
+            set.forEach((id) => heads.has(id) && placeHead(id));
             if (popKey) placePop();
             return;
         }
@@ -1099,6 +1140,14 @@
             te.g.remove();
             te.kn.remove();
             threadEls.delete(k);
+        });
+        const tied = new Set();
+        B.threads.forEach((t) => (tied.add(t.a), tied.add(t.b)));
+        tied.forEach(placeHead);
+        heads.forEach((c, id) => {
+            if (tied.has(id)) return;
+            c.remove();
+            heads.delete(id);
         });
         placePop();
     }
@@ -1479,7 +1528,7 @@
     let openMenu = null; // { el, btn, onClose }
     const menuItems = (m) => [...m.querySelectorAll('[role="menuitem"]')].filter((i) => !i.disabled && i.offsetParent !== null);
 
-    function showMenu(m, { btn = null, x = 0, y = 0, sheet = false, onClose } = {}) {
+    function showMenu(m, { btn = null, x = 0, y = 0, sheet = false, onClose, pinned = false } = {}) {
         closeMenu(false);
         closePalette();
         m.hidden = false;
@@ -1499,8 +1548,23 @@
         }
         btn?.setAttribute("aria-expanded", "true");
         openMenu = { el: m, btn, onClose };
+        // a menu opened on the board stays on the spot it was opened for while the view pans or zooms
+        if (pinned && !sheet) {
+            const r = area.getBoundingClientRect();
+            openMenu.anchor = [(x - r.left - view.x) / view.z, (y - r.top - view.y) / view.z];
+            openMenu.offset = [parseFloat(m.style.left) - x, parseFloat(m.style.top) - y];
+        }
         menuItems(m)[0]?.focus({ preventScroll: true });
         if (!reduceMotion) gsap.fromTo(m, { opacity: 0, y: sheet ? 24 : -6 }, { opacity: 1, y: 0, duration: 0.28, ease: "expo.out" });
+    }
+
+    function placeMenu() {
+        if (!openMenu?.anchor) return;
+        const r = area.getBoundingClientRect();
+        const [wx, wy] = openMenu.anchor;
+        const [ox, oy] = openMenu.offset;
+        openMenu.el.style.left = `${(r.left + view.x + wx * view.z + ox).toFixed(1)}px`;
+        openMenu.el.style.top = `${(r.top + view.y + wy * view.z + oy).toFixed(1)}px`;
     }
 
     function closeMenu(refocus) {
@@ -1549,7 +1613,7 @@
             });
             ctxEl.appendChild(b);
         });
-        showMenu(ctxEl, { x: at[0], y: at[1], sheet });
+        showMenu(ctxEl, { x: at[0], y: at[1], sheet, pinned: true });
     }
 
     function cardMenu(id, at, sheet) {
@@ -2032,10 +2096,22 @@
         const target = over && over.dataset.id !== drag.from ? over : null;
         if (target !== drag.target) {
             drag.target?.classList.remove("is-target");
+            if (drag.target) headFor(drag.target.dataset.id)?.classList.remove("is-target");
             target?.classList.add("is-target");
+            if (target) headFor(target.dataset.id)?.classList.add("is-target");
             drag.target = target;
         }
     }
+
+    // the drawn head covers the real pin: mirror its hover growth
+    area.addEventListener("pointerover", (e) => {
+        const pin = e.target.closest?.(".pb-pin");
+        if (pin) headFor(pin.closest(".pb-card")?.dataset.id)?.classList.add("is-hover");
+    });
+    area.addEventListener("pointerout", (e) => {
+        const pin = e.target.closest?.(".pb-pin");
+        if (pin) headFor(pin.closest(".pb-card")?.dataset.id)?.classList.remove("is-hover");
+    });
 
     area.addEventListener("pointermove", (e) => {
         if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -2174,6 +2250,7 @@
             area.classList.remove("is-threading");
             tempPath.removeAttribute("d");
             d.target?.classList.remove("is-target");
+            headsLayer.querySelectorAll(".is-target").forEach((c) => c.classList.remove("is-target"));
             const to = d.target?.dataset.id;
             if (e.type === "pointerup" && to && addThread(d.from, to)) {
                 announce(`Thread tied between ${nameOf(d.from)} and ${nameOf(to)}`);
@@ -2230,10 +2307,13 @@
         save();
     }
 
+    const accountDlg = q("#acct");
     document.addEventListener(
         "keydown",
         (e) => {
             if (board.hidden || !lightbox.hidden) return;
+            // the account dialog (cloud.js) owns the keyboard while it's open
+            if (accountDlg && !accountDlg.hidden) return;
             const handled = () => {
                 e.preventDefault();
                 e.stopImmediatePropagation();
@@ -3220,7 +3300,8 @@
         board.classList.remove("is-readonly");
         sharedBar.hidden = true;
         store.set(bkey(id), copy);
-        index.list.push({ id, name: copy.name });
+        index.list.push({ id, name: copy.name, updated: Date.now() });
+        changed(id);
         store.set(vkey(id), goal);
         switchBoard(id);
         toast(`Saved as “${copy.name}” in your boards`);
@@ -3329,6 +3410,17 @@
             cv.width = Math.round(W * s);
             cv.height = Math.round(H * s);
             const ctx = cv.getContext("2d");
+            const drawHead = (p) => {
+                if (!p) return;
+                const pg = ctx.createRadialGradient(p[0] - 3, p[1] - 3, 1, p[0], p[1], 8);
+                pg.addColorStop(0, "#ffb299");
+                pg.addColorStop(0.45, accent);
+                pg.addColorStop(1, "#b8340f");
+                ctx.fillStyle = pg;
+                ctx.beginPath();
+                ctx.arc(p[0], p[1], 8, 0, Math.PI * 2);
+                ctx.fill();
+            };
             ctx.scale(s, s);
             ctx.fillStyle = bg;
             ctx.fillRect(0, 0, W, H);
@@ -3415,25 +3507,17 @@
                     ctx.fillText(fromLabel(x).toUpperCase(), w - 10, ih + 62, iw * 0.42);
                 }
                 ctx.restore();
-                const p = pinPoint(x.id);
-                if (p) {
-                    const pg = ctx.createRadialGradient(p[0] - 3, p[1] - 3, 1, p[0], p[1], 8);
-                    pg.addColorStop(0, "#ffb299");
-                    pg.addColorStop(0.45, accent);
-                    pg.addColorStop(1, "#b8340f");
-                    ctx.fillStyle = pg;
-                    ctx.beginPath();
-                    ctx.arc(p[0], p[1], 8, 0, Math.PI * 2);
-                    ctx.fill();
-                }
+                drawHead(pinPoint(x.id));
             });
 
             ctx.save();
             ctx.lineCap = "round";
+            const tied = new Set();
             B.threads.forEach((t) => {
                 const a = pinPoint(t.a);
                 const b = pinPoint(t.b);
                 if (!a || !b) return;
+                tied.add(t.a).add(t.b);
                 const c = ctrlOf(a, b);
                 [
                     ["rgba(0, 0, 0, 0.38)", 3, 3],
@@ -3448,6 +3532,8 @@
                 });
             });
             ctx.restore();
+            // as on screen: each string ends under the head of the pin it's tied to
+            tied.forEach((id) => drawHead(pinPoint(id)));
 
             ctx.font = `500 12px ${mono}`;
             ctx.textBaseline = "middle";
@@ -3534,6 +3620,72 @@
     listeners.add(render);
     syncCount();
 
+    /* ---------- for cloud.js: read and apply boards without echoing changes back ---------- */
+    function afterIndexChange() {
+        if (!index.list.some((b) => b.id === index.active)) {
+            index.active = index.list[0].id;
+            loadActive();
+        }
+        store.set(INDEX, index);
+        syncSwitcher();
+        listeners.forEach((fn) => fn());
+    }
+
+    const local = {
+        // every board on this device: { id, name, updated, empty }
+        list: () => index.list.map((b) => ({ ...b, empty: !(store.get(bkey(b.id))?.pins?.length) })),
+        get: (id) => (index.list.some((b) => b.id === id) ? cleanBoard(store.get(bkey(id)), "Untitled board") : null),
+        // a newer copy arrived from the cloud
+        put(id, data, updated) {
+            if (!ID_RE.test(id)) return;
+            const clean = cleanBoard(data, "Untitled board");
+            if (!store.set(bkey(id), clean)) return;
+            const meta = index.list.find((b) => b.id === id);
+            if (meta) Object.assign(meta, { name: clean.name, updated });
+            else index.list.push({ id, name: clean.name, updated });
+            if (id === index.active && !readonly) {
+                const typing = document.activeElement?.closest?.(".pb-note, .pb-frame-title, #pb-name");
+                loadActive();
+                if (!typing) undoStack = redoStack = [];
+                syncUndo();
+            }
+            afterIndexChange();
+        },
+        // deleted on another device
+        remove(id) {
+            if (!index.list.some((b) => b.id === id)) return;
+            index.list = index.list.filter((b) => b.id !== id);
+            store.del(bkey(id));
+            store.del(vkey(id));
+            if (!index.list.length) {
+                const nid = uid();
+                store.set(bkey(nid), cleanBoard({ name: "My board" }));
+                index.list.push({ id: nid, name: "My board", updated: 0 });
+            }
+            afterIndexChange();
+        },
+        // signed out: this device's copy goes, the account keeps them
+        reset() {
+            index.list.forEach((b) => (store.del(bkey(b.id)), store.del(vkey(b.id))));
+            const nid = uid();
+            store.set(bkey(nid), cleanBoard({ name: "My board" }));
+            index = { active: nid, list: [{ id: nid, name: "My board", updated: 0 }] };
+            loadActive();
+            afterIndexChange();
+        },
+        // an uploaded image was fetched from the cloud: show it if its card is waiting
+        mediaArrived(id) {
+            const card = cardEl(id);
+            const img = card?.querySelector("img");
+            if (!img) return;
+            window.media?.url(id).then((u) => {
+                if (!u) return;
+                img.src = u;
+                card.classList.remove("is-missing");
+            });
+        },
+    };
+
     window.pins = {
         has,
         toggle,
@@ -3542,5 +3694,6 @@
         isBoardOpen: () => !board.hidden,
         openBoard,
         closeBoard,
+        local,
     };
 })();

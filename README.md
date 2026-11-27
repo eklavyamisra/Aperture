@@ -1,12 +1,16 @@
 # Aperture
 
-Editorial photo search on the Unsplash API, with an infinite WebGL canvas mode.
+Editorial photo search on the Unsplash API, with an infinite WebGL canvas mode and pin boards that
+sync across devices when you sign in.
 
 ```
-public/       the site (index.html, style.css, api.js, pins.js, canvas.js, og.jpg, favicon.svg)
-api/unsplash.js   serverless proxy: holds the key, allow-lists endpoints, CDN-caches for 1h
-dev.mjs       local server that serves public/ and runs the proxy
+frontend/     the site: index.html, js/, css/, img/, pages/ (privacy, terms)
+backend/      api/ (serverless functions: unsplash proxy, error log, config) and supabase/schema.sql
+api/          one-line Vercel entry points that re-export backend/api/*
+dev.mjs       local server: serves frontend/ and runs the backend functions
 ```
+
+More: [ARCHITECTURE.md](ARCHITECTURE.md) (how it fits together) · [ROADMAP.md](ROADMAP.md) (what's done and next).
 
 ## Run locally
 
@@ -24,6 +28,27 @@ npx vercel --prod
 ```
 
 Live: https://aperture-bice-nine.vercel.app  (the root index.html only redirects the old GitHub Pages URL there).
+
+## Accounts (Supabase)
+
+Accounts stay switched off until these are done; the site works local-only meanwhile.
+
+1. Create a project at supabase.com (free tier is fine). Pick the region closest to your users.
+2. **SQL Editor → New query**: paste `backend/supabase/schema.sql` and run it. It creates the `boards`
+   table, the private `uploads` bucket and the rules that let each person see only their own data.
+3. **Authentication → URL Configuration**: Site URL `https://aperture-bice-nine.vercel.app`; add
+   `http://localhost:5173` to Redirect URLs for local testing.
+4. **Authentication → Providers → Email**: on (magic link). For real traffic, set up custom SMTP under
+   **Authentication → Emails**: Supabase's built-in mailer is only for testing and sends a few emails an hour.
+5. **Google sign-in**: in Google Cloud Console create an OAuth client (type *Web application*), add
+   `https://<your-project>.supabase.co/auth/v1/callback` as an authorised redirect URI, then paste the client
+   ID and secret into **Authentication → Providers → Google**.
+6. **Project Settings → API**: copy the Project URL and the `anon` public key, then
+   ```
+   npx vercel env add SUPABASE_URL production
+   npx vercel env add SUPABASE_ANON_KEY production
+   ```
+   and redeploy. Locally, add the same two lines to `.env.local`. Never use the `service_role` key here.
 
 ## After the first deploy
 
@@ -79,11 +104,12 @@ loads as an image becomes a picture card, anything else a bookmark), and notes (
 
 ## Errors, storage, legal
 
-- `errors.js` sends uncaught errors to `api/log.js`, which writes them to the Vercel function logs
+- `errors.js` sends uncaught errors to `backend/api/log.js`, which writes them to the Vercel function logs
   (Project → Logs, search `[client-error]`). Reports carry the message, a trimmed stack, the page path and grid/canvas —
   no query string, board contents or visitor details.
 - The board warns before browser storage fills up, and says so if a save fails.
-- `/privacy` and `/terms` are plain pages (`privacy.html`, `terms.html`, `legal.css`), linked from the footer.
+- `/privacy` and `/terms` are plain pages (`pages/privacy.html`, `pages/terms.html`, `css/legal.css`), linked from the footer;
+  `vercel.json` rewrites the short URLs, and `dev.mjs` reads the same rewrites.
 
 ## Tests
 

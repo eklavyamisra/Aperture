@@ -117,6 +117,8 @@ export async function mockUnsplash(target) {
         if (body === null) return route.fulfill({ status: 400, json: { error: "unsupported path" } });
         return route.fulfill({ status: 200, json: body, headers: { "cache-control": "no-store" } });
     });
+    // accounts aren't configured in tests unless cloud.spec.js installs its fake backend
+    await target.route("**/api/config", (route) => route.fulfill({ status: 200, json: {} }));
     await target.route("https://images.unsplash.com/**", (route) =>
         route.fulfill({
             status: 200,

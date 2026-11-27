@@ -1382,7 +1382,8 @@ input[type="search"]::-webkit-search-cancel-button {
     line-height: 0.8;
     letter-spacing: -0.05em;
     text-align: center;
-    margin: 8vw 0 3vw;
+    /* the "p" hangs ~6vw below the line box: leave room so it never touches the small print */
+    margin: 8vw 0 7vw;
     white-space: nowrap;
 }
 
@@ -1391,6 +1392,39 @@ input[type="search"]::-webkit-search-cancel-button {
     justify-content: space-between;
     gap: 16px;
     color: var(--muted);
+}
+
+@media (max-width: 760px) {
+    .footer-top {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 32px;
+    }
+
+    .footer-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 22px;
+        padding: 0;
+        margin: 0;
+        text-align: left;
+    }
+
+    .footer-links a,
+    .footer-links .linklike {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+    }
+
+    .footer-mark {
+        margin: 14vw 0 9vw;
+    }
+
+    .footer-bottom {
+        flex-direction: column;
+        gap: 6px;
+    }
 }
 
 /* ==========================================================
@@ -1958,6 +1992,8 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .pb-card figcaption {
     display: grid;
+    /* the column never grows past the card: long names get an ellipsis instead */
+    grid-template-columns: minmax(0, 1fr);
     gap: 4px;
     padding-top: 8px;
 }
@@ -3698,4 +3734,262 @@ input[type="search"]::-webkit-search-cancel-button {
     .tour-ring {
         transition: none;
     }
+}
+
+/* pin heads drawn above the threads (see placeHead in pins.js) */
+.pb-pinhead {
+    fill: url(#pb-pinhead-fill);
+    filter: drop-shadow(0 3px 2px rgba(0, 0, 0, 0.45));
+    transform-box: fill-box;
+    transform-origin: center;
+    transition: scale 0.25s var(--ease-out);
+}
+
+.pb-pinhead.is-hover,
+.pb-pinhead.is-target {
+    scale: 1.35;
+}
+
+/* ---------- account and sync (cloud.js) ---------- */
+.pb-tools > .pb-account {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.pb-tools > .pb-account[hidden] {
+    display: none;
+}
+
+.pb-account-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.3s;
+}
+
+.pb-account[data-state="synced"] .pb-account-dot {
+    background: #5fbf7a;
+}
+
+.pb-account[data-state="syncing"] .pb-account-dot {
+    background: var(--paper);
+    animation: acct-pulse 1s ease-in-out infinite;
+}
+
+.pb-account[data-state="error"] .pb-account-dot,
+.pb-account[data-state="offline"] .pb-account-dot {
+    background: var(--accent);
+}
+
+@keyframes acct-pulse {
+    50% {
+        opacity: 0.25;
+    }
+}
+
+.acct {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: grid;
+    place-items: center;
+    padding: 16px;
+    background: rgba(8, 7, 6, 0.6);
+}
+
+.acct[hidden] {
+    display: none;
+}
+
+.acct-card {
+    position: relative;
+    width: min(420px, 100%);
+    padding: 28px 24px 22px;
+    border-radius: 22px;
+    background: rgba(22, 21, 18, 0.98);
+    border: 1px solid var(--line);
+    box-shadow: 0 40px 80px -24px rgba(0, 0, 0, 0.9);
+    color: var(--paper);
+}
+
+.acct-close {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    color: var(--muted);
+    cursor: pointer;
+}
+
+.acct-close:hover {
+    color: var(--paper);
+}
+
+.acct-kicker {
+    margin: 0 0 8px;
+    font-size: 11px;
+    color: var(--accent);
+    text-transform: uppercase;
+}
+
+.acct-title {
+    margin: 0 0 10px;
+    font: italic 400 34px/1.02 var(--serif);
+    letter-spacing: -0.01em;
+}
+
+.acct-who {
+    font: 500 20px/1.3 var(--sans);
+    font-style: normal;
+    overflow-wrap: anywhere;
+}
+
+.acct-text {
+    margin: 0 0 20px;
+    font-size: 14px;
+    line-height: 1.55;
+    color: rgba(236, 231, 220, 0.82);
+}
+
+.acct-form {
+    display: grid;
+    gap: 10px;
+}
+
+.acct-form input {
+    min-height: 46px;
+    padding: 0 16px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: rgba(236, 231, 220, 0.05);
+    color: var(--paper);
+    font: 15px var(--sans);
+}
+
+.acct-form input:focus {
+    outline: none;
+    border-color: var(--paper);
+}
+
+.acct-primary,
+.acct-google,
+.acct-quiet {
+    min-height: 46px;
+    padding: 0 18px;
+    border-radius: 999px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: background 0.25s, border-color 0.25s, color 0.25s;
+}
+
+.acct-primary {
+    background: var(--accent);
+    color: #120f0c;
+    border: 1px solid var(--accent);
+}
+
+.acct-primary:hover {
+    background: var(--paper);
+    border-color: var(--paper);
+}
+
+.acct-primary:disabled {
+    opacity: 0.6;
+    cursor: progress;
+}
+
+.acct-google {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    background: var(--paper);
+    color: #1d1b18;
+    border: 1px solid var(--paper);
+}
+
+.acct-google svg {
+    width: 18px;
+    height: 18px;
+}
+
+.acct-google:hover {
+    background: #fff;
+}
+
+.acct-quiet {
+    background: transparent;
+    color: var(--paper);
+    border: 1px solid var(--line);
+}
+
+.acct-quiet:hover {
+    border-color: var(--paper);
+}
+
+.acct-or {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 16px 0;
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+}
+
+.acct-or::before,
+.acct-or::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+}
+
+.acct-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.acct-fine {
+    margin: 18px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--muted);
+}
+
+.acct-fine a {
+    color: var(--paper);
+}
+
+.acct-danger {
+    display: inline;
+    padding: 0;
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+    font: inherit;
+}
+
+.acct-error {
+    margin: 12px 0 0;
+    font-size: 13px;
+    color: var(--accent);
+}
+
+.acct-error:empty {
+    display: none;
+}
+
+.acct :focus-visible {
+    outline: 2px solid var(--paper);
+    outline-offset: 2px;
 }

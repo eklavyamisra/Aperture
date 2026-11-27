@@ -2,12 +2,12 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <script src="errors.js"></script>
+    <script src="js/errors.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Aperture — An Index of Light</title>
     <meta name="description" content="Aperture is an editorial search engine for photography, powered by the Unsplash community.">
     <meta name="theme-color" content="#0d0c0a">
-    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="img/favicon.svg" type="image/svg+xml">
     <!-- link previews (WhatsApp / Instagram / X) -->
     <meta property="og:url" content="https://aperture-bice-nine.vercel.app/">
     <link rel="canonical" href="https://aperture-bice-nine.vercel.app/">
@@ -15,17 +15,17 @@
     <meta property="og:site_name" content="Aperture">
     <meta property="og:title" content="Aperture — An Index of Light">
     <meta property="og:description" content="Search 5,000,000+ free photographs, then step into an infinite canvas of them.">
-    <meta property="og:image" content="https://aperture-bice-nine.vercel.app/og.jpg">
+    <meta property="og:image" content="https://aperture-bice-nine.vercel.app/img/og.jpg">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:image" content="https://aperture-bice-nine.vercel.app/og.jpg">
+    <meta name="twitter:image" content="https://aperture-bice-nine.vercel.app/img/og.jpg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://api.unsplash.com">
     <link rel="preconnect" href="https://images.unsplash.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="css/style.css">
 </head>
 <body class="is-loading">
 
@@ -287,6 +287,7 @@
                     <button type="button" id="pb-palette-btn" data-cursor="Colours" aria-haspopup="dialog" aria-expanded="false" aria-controls="pb-palette">Palette</button>
                     <button type="button" id="pb-share" class="pb-edit" data-cursor="Share"><span>Share</span></button>
                     <button type="button" id="pb-export-btn" data-cursor="Export" aria-haspopup="menu" aria-expanded="false" aria-controls="pb-export-menu">Export ▾</button>
+                    <button type="button" id="pb-account" class="pb-edit pb-account" data-cursor="Account" aria-haspopup="dialog" aria-controls="acct" hidden><span class="pb-account-dot" aria-hidden="true"></span><span class="pb-account-label">Sign in</span></button>
                     <button type="button" class="pb-close" id="pb-close" data-cursor="Wall">Wall <span aria-hidden="true">✕</span></button>
                 </div>
                 <div class="pb-shared mono" id="pb-shared" hidden>
@@ -374,6 +375,43 @@
                 <p class="pb-palette-head mono"><span>Palette</span><button type="button" id="pb-palette-copy">Copy as CSS</button></p>
                 <ul class="pb-swatches" id="pb-swatches"></ul>
             </div>
+
+            <!-- account and sync (cloud.js) -->
+            <div class="acct" id="acct" role="dialog" aria-modal="true" aria-labelledby="acct-title" hidden>
+                <div class="acct-card">
+                    <button type="button" class="acct-close" aria-label="Close">✕</button>
+                    <div data-view="out">
+                        <p class="acct-kicker mono">Account</p>
+                        <h3 class="acct-title" id="acct-title">Your boards, on every device.</h3>
+                        <p class="acct-text">Sign in to keep boards and your uploaded images in sync. Boards already on this device move into your account.</p>
+                        <form class="acct-form" id="acct-form">
+                            <label class="sr-only" for="acct-email">Email address</label>
+                            <input type="email" id="acct-email" required autocomplete="email" inputmode="email" placeholder="you@studio.com">
+                            <button type="submit" class="acct-primary mono">Email me a link</button>
+                        </form>
+                        <p class="acct-or mono"><span>or</span></p>
+                        <button type="button" class="acct-google mono" id="acct-google"><svg viewBox="0 0 18 18" aria-hidden="true"><path fill="#4285F4" d="M17.6 9.2c0-.6-.1-1.2-.2-1.8H9v3.4h4.8a4.1 4.1 0 0 1-1.8 2.7v2.2h2.9c1.7-1.6 2.7-3.9 2.7-6.5z"/><path fill="#34A853" d="M9 18c2.4 0 4.5-.8 6-2.2l-2.9-2.2c-.8.5-1.8.9-3.1.9-2.4 0-4.4-1.6-5.1-3.8H.9v2.3A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.9 10.7a5.4 5.4 0 0 1 0-3.4V5H.9a9 9 0 0 0 0 8l3-2.3z"/><path fill="#EA4335" d="M9 3.6c1.3 0 2.5.5 3.4 1.3l2.6-2.6A9 9 0 0 0 .9 5l3 2.3C4.6 5.2 6.6 3.6 9 3.6z"/></svg>Continue with Google</button>
+                        <p class="acct-fine">By signing in you agree to the <a href="/terms" target="_blank">terms</a> and <a href="/privacy" target="_blank">privacy policy</a>.</p>
+                    </div>
+                    <div data-view="sent" hidden>
+                        <p class="acct-kicker mono">Check your inbox</p>
+                        <h3 class="acct-title">Link on its way.</h3>
+                        <p class="acct-text">We sent a sign-in link to <b id="acct-sent-to"></b>. Open it in this browser to finish. It can take a minute to arrive.</p>
+                        <button type="button" class="acct-quiet mono" id="acct-back">Use a different email</button>
+                    </div>
+                    <div data-view="in" hidden>
+                        <p class="acct-kicker mono">Signed in</p>
+                        <h3 class="acct-title acct-who" id="acct-who"></h3>
+                        <p class="acct-text" id="acct-status" role="status"></p>
+                        <div class="acct-row">
+                            <button type="button" class="acct-primary mono" id="acct-sync">Sync now</button>
+                            <button type="button" class="acct-quiet mono" id="acct-signout">Sign out</button>
+                        </div>
+                        <p class="acct-fine">Signing out removes this device's copy. Your boards stay in your account. <button type="button" class="acct-danger" id="acct-wipe">Delete my cloud data</button></p>
+                    </div>
+                    <p class="acct-error" id="acct-error" role="alert"></p>
+                </div>
+            </div>
         </section>
     </div>
 
@@ -444,10 +482,11 @@
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/Flip.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/lenis@1.1.18/dist/lenis.min.js"></script>
-    <script src="api.js"></script>
-    <script src="media.js"></script>
-    <script src="pins.js"></script>
-    <script src="tour.js"></script>
-    <script src="canvas.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/media.js"></script>
+    <script src="js/pins.js"></script>
+    <script src="js/tour.js"></script>
+    <script src="js/cloud.js"></script>
+    <script src="js/canvas.js"></script>
 </body>
 </html>

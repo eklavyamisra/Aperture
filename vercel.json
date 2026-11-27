@@ -1,7 +1,15 @@
 {
     "$schema": "https://openapi.vercel.sh/vercel.json",
-    "outputDirectory": "public",
+    "outputDirectory": "frontend",
     "cleanUrls": true,
+    "rewrites": [
+        { "source": "/privacy", "destination": "/pages/privacy" },
+        { "source": "/terms", "destination": "/pages/terms" }
+    ],
+    "redirects": [
+        { "source": "/og.jpg", "destination": "/img/og.jpg", "permanent": true },
+        { "source": "/favicon.svg", "destination": "/img/favicon.svg", "permanent": true }
+    ],
     "headers": [
         {
             "source": "/(.*)\\.(css|js|png|jpg|svg)",
