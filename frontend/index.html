@@ -294,6 +294,7 @@
                     <button type="button" id="pb-find-btn" class="pb-main" data-cursor="Find" aria-keyshortcuts="Control+F /" aria-controls="pb-find">Find</button>
                     <button type="button" id="pb-palette-btn" class="pb-wide" data-cursor="Colours" aria-haspopup="dialog" aria-expanded="false" aria-controls="pb-palette">Palette</button>
                     <button type="button" id="pb-comments-btn" data-cursor="Comments" aria-expanded="false" aria-controls="pb-comments" hidden>Comments <span class="pb-ccount" id="pb-ccount"></span></button>
+                    <ul class="pb-people pb-main" id="pb-people" aria-label="Also on this board" hidden></ul>
                     <span class="pb-sep" aria-hidden="true"></span>
                     <button type="button" id="pb-share" class="pb-edit pb-wide" data-cursor="Share"><span>Share</span></button>
                     <button type="button" id="pb-export-btn" data-cursor="Export" aria-haspopup="menu" aria-expanded="false" aria-controls="pb-export-menu">Export ▾</button>
@@ -304,7 +305,8 @@
                     <button type="button" class="pb-close pb-main" id="pb-close" data-cursor="Wall">Wall <span aria-hidden="true">✕</span></button>
                 </div>
                 <div class="pb-shared mono" id="pb-shared" hidden>
-                    <span>Shared board · <b id="pb-shared-name"></b> · view only</span>
+                    <span>Shared board · <b id="pb-shared-name"></b> · <span id="pb-shared-mode">view only</span></span>
+                    <button type="button" id="pb-shared-signin" data-cursor="Sign in" hidden>Sign in to edit</button>
                     <button type="button" id="pb-keep" data-cursor="Keep">Save a copy to my boards</button>
                 </div>
                 <p class="pb-hint mono pb-edit">Drop or paste images and links · drag a <span class="pb-dot" aria-hidden="true"></span> pin onto another card to tie a thread · <kbd>Shift</kbd> + drag to select · right-click for more · <kbd>N</kbd> note · <kbd>U</kbd> upload · <kbd>L</kbd> link · <kbd>W</kbd> wall · <kbd>G</kbd> group · <kbd>/</kbd> find · <kbd>M</kbd> map · <kbd>Ctrl</kbd><kbd>Z</kbd> undo · <kbd>?</kbd> tour</p>
@@ -475,6 +477,11 @@
                         <label class="share-choice"><input type="radio" name="share-access" id="share-anyone" value="link"> Anyone with the link</label>
                         <label class="share-choice"><input type="radio" name="share-access" id="share-withpass" value="password"> Only people with the password</label>
                     </fieldset>
+                    <fieldset class="share-access">
+                        <legend class="acct-kicker mono">What they can do</legend>
+                        <label class="share-choice"><input type="radio" name="share-role" id="share-view" value="view"> View</label>
+                        <label class="share-choice"><input type="radio" name="share-role" id="share-edit" value="edit"> Edit with you, live (they sign in first)</label>
+                    </fieldset>
                     <form class="acct-form share-pass" id="share-pass-form" hidden>
                         <label class="sr-only" for="share-pass">Password</label>
                         <input type="password" id="share-pass" maxlength="72" autocomplete="new-password" placeholder="Password (4 or more characters)">
@@ -573,6 +580,7 @@
     <script src="js/cloud.js"></script>
     <script src="js/share.js"></script>
     <script src="js/comments.js"></script>
+    <script src="js/live.js"></script>
     <script src="js/canvas.js"></script>
 </body>
 </html>

@@ -14,7 +14,31 @@ class FakeCloud {
         this.blobs = new Map(); // path -> data URL
         this.shares = new Map(); // code -> { owner, boardId, pass, fails }
         this.comments = []; // { id, owner, boardId, author, author_name, item_id, body, created_at }
+        this.editors = new Set(); // `${owner}|${boardId}|${member}` (#21)
+        this.subs = new Map(); // channel id -> { page, room, user, me }: a stand-in for Realtime
+        this.saves = 0;
         this.n = 0;
+    }
+    // #21: the shares trigger in schema.sql removes a board's editors
+    dropEditors(owner, boardId) {
+        for (const k of [...this.editors]) if (k.startsWith(`${owner}|${boardId}|`)) this.editors.delete(k);
+    }
+    // live_room(): the board behind a room, for its owner and editors only
+    liveRoom(me, room) {
+        if (!me) return null;
+        const s = [...this.shares.values()].find((x) => x.room === room);
+        const r = s && this.rows.get(`${s.owner}|${s.boardId}`);
+        if (!s || !s.editable || !r || r.deleted) return null;
+        if (s.owner !== me.id && !this.editors.has(`${s.owner}|${s.boardId}|${me.id}`)) return null;
+        return s;
+    }
+    deliver(id, ...args) {
+        const sub = this.subs.get(id);
+        sub?.page.evaluate(([i, a]) => window.__liveIn?.(i, ...a), [id, args]).catch(() => this.subs.delete(id));
+    }
+    presence(room) {
+        const list = [...this.subs.values()].filter((x) => x.room === room).map((x) => x.me);
+        this.subs.forEach((x, id) => x.room === room && this.deliver(id, "presence", list));
     }
     // share_check(): { status, owner, boardId } or null; the owner needs no password
     shareCheck(code, password, me) {
@@ -53,7 +77,7 @@ class FakeCloud {
         }
         const data = JSON.parse(JSON.stringify(r.data));
         data.pins = data.pins.filter((x) => x.kind !== "upload");
-        return { status: "ok", name: r.name, data, updated: r.updated };
+        return { status: "ok", name: r.name, data, updated: r.updated, editable: !!s.editable };
     }
     shareOf(boardOwner, boardId) {
         return [...this.shares].find(([, s]) => s.owner === boardOwner && s.boardId === boardId) || null;
@@ -66,7 +90,7 @@ class FakeCloud {
         const id = this.users.get(email);
         return [...this.rows.values()].filter((r) => r.owner === id && (!live || !r.deleted));
     }
-    call(ctx, method, arg) {
+    call(ctx, method, arg, page) {
         const me = this.sessions.get(ctx) || null;
         const mine = () => {
             if (!me) throw new Error("not signed in");
@@ -104,7 +128,7 @@ class FakeCloud {
             case "findShare": {
                 mine();
                 const hit = this.shareOf(me.id, arg);
-                return hit ? { code: hit[0], protected: !!hit[1].pass } : null;
+                return hit ? { code: hit[0], protected: !!hit[1].pass, can_edit: !!hit[1].editable, room: hit[1].room } : null;
             }
             case "renameShare": {
                 mine();
@@ -112,6 +136,7 @@ class FakeCloud {
                 if (!hit || !/^[A-Za-z0-9]{10,16}$/.test(arg.code)) throw new Error("can't rename");
                 this.shares.delete(hit[0]);
                 this.shares.set(arg.code, hit[1]);
+                this.dropEditors(me.id, arg.boardId);
                 return null;
             }
             case "setSharePassword": {
@@ -120,12 +145,14 @@ class FakeCloud {
                 if (!hit) throw new Error("board is not shared");
                 if (arg.password != null && (arg.password.length < 4 || arg.password.length > 72)) throw new Error("password must be 4 to 72 characters");
                 Object.assign(hit[1], { pass: arg.password ?? null, fails: 0 });
+                this.dropEditors(me.id, arg.boardId);
                 return null;
             }
             case "deleteShare": {
                 mine();
                 const hit = this.shareOf(me.id, arg);
                 if (hit) this.shares.delete(hit[0]);
+                this.dropEditors(me.id, arg);
                 return null;
             }
             case "createShare": {
@@ -133,7 +160,70 @@ class FakeCloud {
                 if (!/^[A-Za-z0-9]{10,16}$/.test(arg.code)) throw new Error("bad code");
                 if (!this.rows.has(`${me.id}|${arg.boardId}`)) throw new Error("board isn't in the account");
                 if (this.shares.has(arg.code) || [...this.shares.values()].some((s) => s.owner === me.id && s.boardId === arg.boardId)) throw new Error("duplicate");
-                this.shares.set(arg.code, { owner: me.id, boardId: arg.boardId, pass: null, fails: 0 });
+                this.shares.set(arg.code, { owner: me.id, boardId: arg.boardId, pass: null, fails: 0, editable: false, room: `room${++this.n}x${Math.random().toString(36).slice(2)}` });
+                return null;
+            }
+            case "setShareEditable": {
+                mine();
+                const hit = this.shareOf(me.id, arg.boardId);
+                if (!hit) throw new Error("board is not shared");
+                if (hit[1].editable && !arg.on) this.dropEditors(me.id, arg.boardId);
+                hit[1].editable = !!arg.on;
+                return null;
+            }
+            case "joinBoard": {
+                if (!me) throw new Error("sign in to edit");
+                const ok = this.shareCheck(arg.code, arg.password, me);
+                if (!ok) return null;
+                if (ok.status !== "ok") return { status: ok.status };
+                const s = this.shares.get(arg.code);
+                if (!s.editable) return { status: "view" };
+                if (s.owner !== me.id) this.editors.add(`${s.owner}|${s.boardId}|${me.id}`);
+                const b = this.sharedBoard(arg.code, arg.password);
+                return { status: "ok", room: s.room, name: b.name, data: b.data, updated: b.updated };
+            }
+            case "liveBoard": {
+                const s = this.liveRoom(me, arg);
+                if (!s) return null;
+                const r = this.rows.get(`${s.owner}|${s.boardId}`);
+                const data = JSON.parse(JSON.stringify(r.data));
+                data.pins = data.pins.filter((x) => x.kind !== "upload");
+                return { name: r.name, data, updated: r.updated };
+            }
+            case "saveLive": {
+                // save_live_board(): keeps the owner's uploads and the threads tied to them
+                if (!me) throw new Error("sign in to edit");
+                const s = this.liveRoom(me, arg.room);
+                if (!s) throw new Error("not allowed");
+                const key = `${s.owner}|${s.boardId}`;
+                const r = this.rows.get(key);
+                const ups = r.data.pins.filter((x) => x.kind === "upload");
+                const upIds = new Set(ups.map((x) => x.id));
+                const data = JSON.parse(JSON.stringify(arg.data));
+                data.pins = data.pins.filter((x) => x.kind !== "upload").concat(ups);
+                data.threads = data.threads.concat(r.data.threads.filter((t) => upIds.has(t.a) || upIds.has(t.b)));
+                data.name = String(data.name || "").trim().slice(0, 60) || r.name;
+                const updated = Math.max(arg.edited, r.updated + 1);
+                this.rows.set(key, { ...r, name: data.name, data, updated });
+                this.saves++;
+                return updated;
+            }
+            case "liveSubscribe": {
+                if (!this.liveRoom(me, arg.room)) return false;
+                this.subs.set(arg.id, { page, room: arg.room, user: me, me: arg.me });
+                setTimeout(() => this.presence(arg.room), 10);
+                return true;
+            }
+            case "liveSend": {
+                const sub = this.subs.get(arg.id);
+                if (!sub || !this.liveRoom(sub.user, sub.room)) return false;
+                this.subs.forEach((x, id) => id !== arg.id && x.room === sub.room && this.deliver(id, "message", arg.event, arg.payload));
+                return true;
+            }
+            case "liveLeave": {
+                const sub = this.subs.get(arg);
+                this.subs.delete(arg);
+                if (sub) this.presence(sub.room);
                 return null;
             }
             case "shareComments": {
@@ -175,7 +265,7 @@ class FakeCloud {
 }
 
 async function installCloud(context, cloud) {
-    await context.exposeBinding("__cloud", ({ context: ctx }, method, arg) => cloud.call(ctx, method, arg));
+    await context.exposeBinding("__cloud", ({ context: ctx, page }, method, arg) => cloud.call(ctx, method, arg, page));
     await context.addInitScript(() => {
         const listeners = [];
         const call = (m, a) => window.__cloud(m, a);
@@ -219,6 +309,29 @@ async function installCloud(context, cloud) {
             boardComments: (boardId) => call("boardComments", boardId),
             addComment: (where, c) => call("addComment", { where, c }),
             deleteComment: (id) => call("deleteComment", id),
+            setShareEditable: (boardId, on) => call("setShareEditable", { boardId, on }),
+            joinBoard: (code, password) => call("joinBoard", { code, password: password ?? null }),
+            liveBoard: (room) => call("liveBoard", room),
+            saveLive: (room, data, edited) => call("saveLive", { room, data, edited }),
+            // Realtime stand-in: the test process passes messages between pages (window.__liveIn)
+            channel(room, me, h) {
+                const id = `ch${Math.random().toString(36).slice(2)}`;
+                (window.__liveSubs ||= {})[id] = h;
+                window.__liveIn ||= (i, kind, a, b) => {
+                    const sub = window.__liveSubs[i];
+                    if (!sub) return;
+                    if (kind === "presence") sub.presence(a);
+                    else sub.message(a, b);
+                };
+                call("liveSubscribe", { id, room, me }).then((ok) => (ok ? h.ready() : h.error("denied")));
+                return {
+                    send: (event, payload) => call("liveSend", { id, event, payload }),
+                    leave() {
+                        delete window.__liveSubs[id];
+                        call("liveLeave", id);
+                    },
+                };
+            },
             wipe: () => call("wipe"),
         };
     });
@@ -683,5 +796,170 @@ test("cloud: comments on a shared board", async ({ page, freshPage }, info) => {
         await B.locator("#pb-account").click();
         await B.locator("#acct-signout").click();
         await expect(B.locator("#pb-comments-btn")).toBeHidden();
+    });
+});
+
+test("cloud: editing a shared board together, live (#21)", async ({ page, freshPage }, info) => {
+    const cloud = new FakeCloud();
+    const A = page; // the owner
+    const B = freshPage; // someone with the link
+    const owner = "ada@example.com";
+    await installCloud(B.context(), cloud);
+    await serveSharePages(B.context(), cloud);
+    B.on("dialog", (d) => d.accept());
+    await sharedSetup(A, cloud, owner, info);
+    const row = () => cloud.boards(owner)[0];
+    let link;
+
+    await test.step("the owner makes an edit link", async () => {
+        await openSharePanel(A);
+        await A.locator("#share-create").click();
+        await expect(A.locator("#share-url")).toHaveValue(/\/b\/[A-Za-z0-9]{10}$/, { timeout: 15000 });
+        await expect(A.locator("#share-view")).toBeChecked();
+        await A.locator("#share-edit").check();
+        await expect(A.locator("#share-status")).toContainText("they can edit it with you", { timeout: 15000 });
+        await expect(A.locator("#share-note")).toContainText("editors can't add their own");
+        link = await A.locator("#share-url").inputValue();
+        expect([...cloud.shares.values()][0].editable).toBe(true);
+        await closeSharePanel(A);
+        await expect.poll(() => A.evaluate(() => window.live.status()), { timeout: 15000 }).toMatchObject({ kind: "owner", ready: true });
+    });
+
+    await test.step("signed out, the link is view-only and offers to sign in", async () => {
+        await B.goto(link);
+        await B.waitForSelector("#pb.is-readonly:not([hidden])", { timeout: 30000 });
+        await expect(B.locator("#pb-shared-mode")).toHaveText("view only until you sign in");
+        await expect(B.locator("#pb-shared-signin")).toBeVisible();
+        expect(cloud.editors.size).toBe(0);
+    });
+
+    await test.step("after signing in, they edit the board (no uploads) and see who's there", async () => {
+        await B.locator("#pb-shared-signin").click();
+        await expect(B.locator("#acct")).toBeVisible();
+        await B.locator("#acct-email").fill("bo@example.com");
+        await B.locator("#acct-form button[type=submit]").click();
+        await expect(B.locator("#acct-who")).toHaveText("bo@example.com");
+        await B.keyboard.press("Escape");
+        await expect(B.locator("#pb")).toHaveClass(/is-guest/, { timeout: 15000 });
+        await expect(B.locator("#pb")).not.toHaveClass(/is-readonly/);
+        await expect(B.locator("#pb-shared-mode")).toHaveText("editing together");
+        await expect(B.locator("#pb-shared-signin")).toBeHidden();
+        await expect(B.locator(".pb-card")).toHaveCount(3);
+        await expect(B.locator("#pb-share")).toBeHidden();
+        await expect(B.locator("#pb-picker-btn")).toBeHidden();
+        expect(cloud.editors.size).toBe(1);
+        await expect(A.locator("#pb-people .pb-person")).toHaveCount(1, { timeout: 15000 });
+        await expect(A.locator("#pb-people .pb-person")).toHaveAttribute("title", "Guest");
+        await expect(B.locator("#pb-people .pb-person")).toHaveAttribute("title", /\(owner\)$/);
+    });
+
+    await test.step("on a phone, the editing board fits the screen", async () => {
+        const size = B.viewportSize();
+        await B.setViewportSize({ width: 390, height: 844 });
+        await B.waitForTimeout(400);
+        expect(await B.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        await expect(B.locator("#pb-people")).toBeInViewport();
+        await expect(B.locator("#pb-shared-mode")).toBeInViewport();
+        await B.screenshot({ path: info.outputPath("guest-phone.png") });
+        await B.setViewportSize(size);
+    });
+
+    await test.step("an editor's note appears on the owner's screen and saves into the owner's board", async () => {
+        await B.locator("#pb-area").focus();
+        await B.keyboard.press("n");
+        await expect(B.locator(".pb-card.is-note .pb-note")).toBeFocused();
+        await B.keyboard.type("from Bo");
+        await B.keyboard.press("Escape");
+        await expect(A.locator(".pb-card.is-note .pb-note")).toHaveValue("from Bo", { timeout: 10000 });
+        await expect.poll(() => row().data.pins.some((x) => x.note === "from Bo"), { timeout: 15000 }).toBe(true);
+        // the owner's upload, which the editor never saw, is still in the saved board
+        expect(row().data.pins.filter((x) => x.kind === "upload")).toHaveLength(1);
+        await expect(A.locator(".pb-card")).toHaveCount(5);
+    });
+
+    await test.step("editors can't add images from their device", async () => {
+        const file = info.outputPath("theirs.png");
+        fs.writeFileSync(file, png("#224466", 200, 200));
+        await B.setInputFiles("#pb-file", file);
+        await expect(B.locator("#toast")).toContainText("can't go on someone else's board");
+        await expect(B.locator(".pb-card")).toHaveCount(4);
+    });
+
+    await test.step("the owner's changes reach the editor; uploads stay private", async () => {
+        await A.locator(".pb-card.is-unsplash").first().focus();
+        await A.keyboard.press("Delete");
+        await expect(A.locator(".pb-card")).toHaveCount(4);
+        await expect(B.locator(".pb-card")).toHaveCount(3, { timeout: 10000 });
+        await expect(B.locator(".pb-card.is-upload")).toHaveCount(0);
+    });
+
+    await test.step("a card dragged by the editor lands in the same place for the owner", async () => {
+        const note = B.locator(".pb-card.is-note");
+        const box = await note.boundingBox();
+        await B.mouse.move(box.x + box.width / 2, box.y + 12);
+        await B.mouse.down();
+        for (let i = 1; i <= 8; i++) await B.mouse.move(box.x + box.width / 2 + i * 15, box.y + 12 + i * 10);
+        await B.mouse.up();
+        await expect(B.locator(".pb-card.is-note.is-held")).toHaveCount(0, { timeout: 5000 });
+        const left = await note.evaluate((el) => el.style.left);
+        await expect(A.locator(".pb-card.is-note")).toHaveCSS("left", left, { timeout: 10000 });
+    });
+
+    await test.step("the editor's cursor shows on the owner's board", async () => {
+        const area = await B.locator("#pb-area").boundingBox();
+        await B.mouse.move(area.x + area.width / 2, area.y + area.height / 2);
+        await B.mouse.move(area.x + area.width / 2 + 20, area.y + area.height / 2 + 20);
+        await expect(A.locator(".pb-cursor")).toHaveCount(1, { timeout: 10000 });
+        await expect(A.locator(".pb-cursor span")).toHaveText("Guest");
+    });
+
+    await test.step("the owner's undo takes back only the owner's own step", async () => {
+        await A.locator("#pb-area").focus();
+        await A.keyboard.press("Control+z");
+        await expect(A.locator(".pb-card")).toHaveCount(5);
+        await expect(A.locator(".pb-card.is-note .pb-note")).toHaveValue("from Bo");
+        await expect(B.locator(".pb-card")).toHaveCount(4, { timeout: 10000 });
+    });
+
+    await test.step("turning editing off sends the editor back to view-only", async () => {
+        await openSharePanel(A);
+        await A.locator("#share-view").check();
+        await expect(A.locator("#share-status")).toContainText("but not change it", { timeout: 15000 });
+        await closeSharePanel(A);
+        await expect(B.locator("#toast")).toContainText("turned off editing", { timeout: 10000 });
+        await expect(B.locator("#pb")).toHaveClass(/is-readonly/);
+        await expect(B.locator("#pb")).not.toHaveClass(/is-guest/);
+        await expect(B.locator("#pb-shared-mode")).toHaveText("view only");
+        await expect(A.locator("#pb-people")).toBeHidden({ timeout: 10000 });
+        expect(cloud.editors.size).toBe(0);
+        // what was on screen is still there to look at
+        await expect(B.locator(".pb-card")).toHaveCount(4);
+    });
+
+    await test.step("a password-protected edit link: the password opens it for editing", async () => {
+        await openSharePanel(A);
+        await A.locator("#share-edit").check();
+        await expect(A.locator("#share-status")).toContainText("they can edit it with you", { timeout: 15000 });
+        await A.locator("#share-withpass").check();
+        await A.locator("#share-pass").fill("tangerine");
+        await A.locator("#share-pass-save").click();
+        await expect(A.locator("#share-status")).toContainText("link and the password", { timeout: 15000 });
+        await closeSharePanel(A);
+        await B.goto(link);
+        await expect(B.locator("#share-unlock-pass")).toBeVisible({ timeout: 30000 });
+        await B.locator("#share-unlock-pass").fill("tangerine");
+        await B.locator("#share-unlock-form button").click();
+        await expect(B.locator("#pb")).toHaveClass(/is-guest/, { timeout: 20000 });
+        await expect(B.locator(".pb-card")).toHaveCount(4);
+    });
+
+    await test.step("a new link sends the editor back to view-only", async () => {
+        await openSharePanel(A);
+        await A.locator("#share-renew").click(); // confirm() accepted
+        await expect(A.locator("#share-url")).not.toHaveValue(link, { timeout: 15000 });
+        await closeSharePanel(A);
+        await expect(B.locator("#toast")).toContainText("changed this board's link or password", { timeout: 10000 });
+        await expect(B.locator("#pb")).toHaveClass(/is-readonly/);
+        expect(cloud.editors.size).toBe(0);
     });
 });

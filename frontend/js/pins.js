@@ -234,7 +234,9 @@
     let B; // { name, pins (items of every kind), threads, frames }
     const ids = new Set();
     let readonly = false; // viewing someone's shared link
-    let shared = null; // { code, password } while viewing a /b/<code> link: comments go there (#20)
+    let shared = null; // { code, password, editable } while viewing a /b/<code> link: comments go there (#20)
+    let guest = false; // editing someone else's board through their edit link (#21): saved by live.js, not here
+    const away = () => readonly || guest; // the board on screen isn't one of this device's boards
     let commentCounts = new Map(); // item id -> comments on that card (comments.js fills it)
     // the board on screen changed (switched, opened a shared one, left it): comments.js reloads
     const contextChanged = () => document.dispatchEvent(new CustomEvent("pins:context"));
@@ -252,9 +254,13 @@
 
     // tell cloud.js a board changed locally (it pushes after a short pause)
     const changed = (id) => document.dispatchEvent(new CustomEvent("pins:changed", { detail: { id } }));
+    // tell live.js the board on screen changed, so it can send the difference to others (#21)
+    const edited = () => document.dispatchEvent(new CustomEvent("pins:edit"));
 
     function persist() {
         if (readonly) return;
+        if (guest) return edited();
+        edited();
         if (!store.set(bkey(index.active), B)) return;
         const meta = index.list.find((b) => b.id === index.active);
         if (meta) {
@@ -353,7 +359,8 @@
 
     // already-clean items, one undo step
     function insertItems(list) {
-        list = list.filter((x) => x && !has(x.id));
+        // an editor's own images would only exist on their device (#21)
+        list = list.filter((x) => x && !has(x.id) && !(guest && x.kind === "upload"));
         if (!list.length || readonly) return [];
         checkpoint();
         list.forEach((x) => {
@@ -541,7 +548,7 @@
     let pickIdx = 0;
 
     function boardSummary(id) {
-        const b = id === index.active && !readonly ? B : store.get(bkey(id));
+        const b = id === index.active && !away() ? B : store.get(bkey(id));
         const pins = Array.isArray(b?.pins) ? b.pins : [];
         const thumbs = pins
             .map((x) => x?.photo?.urls?.raw)
@@ -603,7 +610,7 @@
     }
 
     function openPicker() {
-        if (pickOpen || readonly) return;
+        if (pickOpen || away()) return;
         pickOpen = true;
         pickIdx = Math.max(0, index.list.findIndex((b) => b.id === index.active));
         buildPicker();
@@ -766,6 +773,7 @@
 
     let viewSaveT = 0;
     let lastLvl = "";
+    const viewHooks = new Set(); // live.js keeps other people's cursors in place as the view moves (#21)
     function applyView() {
         world.style.transform = `translate3d(${view.x}px, ${view.y}px, 0) scale(${view.z})`;
         const g = 26 * view.z;
@@ -782,7 +790,8 @@
         placePop();
         placeMenu();
         scheduleMinimap();
-        if (readonly) return;
+        viewHooks.forEach((fn) => fn(view));
+        if (away()) return;
         clearTimeout(viewSaveT);
         const id = index.active;
         viewSaveT = setTimeout(() => store.set(vkey(id), goal), 300);
@@ -1926,6 +1935,8 @@
                 guides.setAttribute("d", d.guide || "");
             }
             drawStrings(ids);
+            // others on the board see the cards move while they're carried (#21; live.js throttles)
+            window.live?.dragging?.(() => ids.map((id) => (geo.get(id) ? [id, Math.round(geo.get(id).l), Math.round(geo.get(id).t)] : null)).filter(Boolean));
             if (d.released && Math.abs(d.tx - d.cx) < 0.25 && Math.abs(d.ty - d.cy) < 0.25 && Math.abs(d.tilt) < 0.15) return finishCard(d);
             d.raf = requestAnimationFrame(step);
         };
@@ -2493,8 +2504,10 @@
     };
 
     let pickAt = null;
+    const noGuestUploads = () => toast("Images from your device can't go on someone else's board yet. Paste a link to the image instead.", "warn");
     function pickFiles(at) {
         if (readonly) return;
+        if (guest) return noGuestUploads();
         pickAt = at || null;
         fileInput.click();
     }
@@ -2506,6 +2519,7 @@
 
     async function addUploads(files, at) {
         if (readonly) return;
+        if (guest) return noGuestUploads();
         files = [...files].filter((f) => f && /^image\//.test(f.type));
         if (!files.length) return toast("Only images can be added to a board", "warn");
         if (!window.media?.available) return toast("This browser can't store images, so uploads aren't available", "warn");
@@ -3083,7 +3097,7 @@
         opening = true;
         render();
         opening = false;
-        if (readonly || (!hadView && (B.pins.length || B.frames.length))) {
+        if (away() || (!hadView && (B.pins.length || B.frames.length))) {
             hadView = true;
             fit(false);
         } else applyView();
@@ -3118,7 +3132,7 @@
             board.hidden = true;
             boardBtn.setAttribute("aria-expanded", "false");
             window.canvasView?.setPaused?.(false);
-            if (readonly) leaveShared();
+            if (away()) leaveShared();
             boardBtn.focus({ preventScroll: true });
             then?.();
         };
@@ -3169,7 +3183,7 @@
             const before = snapshot();
             const fresh = [];
             for (const x of data.pins) {
-                if (has(x.id)) continue;
+                if (has(x.id) || (guest && x.kind === "upload")) continue;
                 if (x.kind === "upload") {
                     try {
                         await window.media.put(x.id, await window.media.dataURLToBlob(mediaData[x.id]));
@@ -3385,17 +3399,173 @@
         } catch (e) {}
     }
 
-    function leaveShared() {
+    function dropShared() {
+        // live.js saves an editor's last changes while they're still on screen (#21)
+        if (guest) document.dispatchEvent(new CustomEvent("pins:guest-leave"));
         leavePath();
         shared = null;
         readonly = false;
-        board.classList.remove("is-readonly");
+        guest = false;
+        board.classList.remove("is-readonly", "is-guest");
         sharedBar.hidden = true;
+        setSharedMode("view");
+    }
+
+    function leaveShared() {
+        dropShared();
         loadActive();
         loadView();
         syncSwitcher();
         render();
         contextChanged();
+    }
+
+    /* ---------- editing someone's board together (#21; live.js runs the connection) ---------- */
+    // The shared bar says what a visitor can do: "view" only, "signin" to edit, or "edit".
+    function setSharedMode(mode) {
+        q("#pb-shared-mode").textContent = { signin: "view only until you sign in", edit: "editing together" }[mode] || "view only";
+        q("#pb-shared-signin").hidden = mode !== "signin";
+    }
+    q("#pb-shared-signin").addEventListener("click", () => window.cloud?.open?.());
+
+    // what an editor may hold: the shared board without uploads (they live in the owner's bucket)
+    const guestBoard = (raw, name = "Shared board") => {
+        raw = raw && typeof raw === "object" ? raw : {};
+        return cleanBoard({ ...raw, pins: (Array.isArray(raw.pins) ? raw.pins : []).filter((x) => x?.kind !== "upload") }, name);
+    };
+
+    function enterGuest(raw, name) {
+        if (!shared || board.hidden) return false;
+        readonly = false;
+        guest = true;
+        B = guestBoard(raw, name || B.name);
+        reindex();
+        clearSel();
+        undoStack = [];
+        redoStack = [];
+        syncUndo();
+        closePop(false);
+        board.classList.remove("is-readonly");
+        board.classList.add("is-guest");
+        q("#pb-shared-name").textContent = B.name;
+        setSharedMode("edit");
+        render();
+        return true;
+    }
+
+    // a fresh copy from the database (after joining or reconnecting): keep what's on screen in step
+    function resetGuest(raw) {
+        if (!guest) return;
+        const next = guestBoard(raw, B.name);
+        if (JSON.stringify(next) === JSON.stringify(B)) return;
+        B = next;
+        reindex();
+        undoStack = [];
+        redoStack = [];
+        syncUndo();
+        render();
+    }
+
+    // editing was turned off (or the link changed): back to a read-only view of what's on screen
+    function leaveGuest() {
+        if (!guest) return;
+        guest = false;
+        readonly = true;
+        clearSel();
+        closePop(false);
+        closeMenu(false);
+        undoStack = [];
+        redoStack = [];
+        syncUndo();
+        board.classList.remove("is-guest");
+        board.classList.add("is-readonly");
+        setSharedMode("view");
+        render();
+    }
+
+    function cleanFrame(f) {
+        if (!f || typeof f.id !== "string" || !ID_RE.test(f.id) || ![f.x, f.y, f.w, f.h].every(Number.isFinite)) return null;
+        return { id: f.id, x: f.x, y: f.y, w: clamp(200, 10000, f.w), h: clamp(140, 10000, f.h), title: str(f.title, 60) };
+    }
+
+    // Apply someone else's change to a board-shaped object (the board, or an undo snapshot).
+    // op: { set: [item], del: [id], tset: [thread], tdel: [{ a, b }], fset: [frame], fdel: [id], name }
+    // Everything goes through the same cleaning as stored boards.
+    function applyOp(T, op) {
+        const arr = (v, n) => (Array.isArray(v) ? v.slice(0, n) : []);
+        const del = new Set(arr(op.del, MAX_PINS).filter((id) => typeof id === "string"));
+        if (del.size) {
+            T.pins = T.pins.filter((x) => !del.has(x.id));
+            T.threads = T.threads.filter((t) => !del.has(t.a) && !del.has(t.b));
+        }
+        arr(op.set, MAX_PINS).forEach((raw) => {
+            const x = cleanItem(raw);
+            if (!x || (guest && x.kind === "upload")) return;
+            const i = T.pins.findIndex((p) => p.id === x.id);
+            if (i >= 0) T.pins[i] = x;
+            else if (T.pins.length < MAX_PINS) T.pins.unshift(x);
+        });
+        const tdel = new Set(arr(op.tdel, 2000).filter((t) => t && typeof t.a === "string" && typeof t.b === "string").map((t) => tkey(t.a, t.b)));
+        if (tdel.size) T.threads = T.threads.filter((t) => !tdel.has(tkey(t.a, t.b)));
+        const present = new Set(T.pins.map((x) => x.id));
+        arr(op.tset, 2000).forEach((t) => {
+            if (!t || typeof t.a !== "string" || typeof t.b !== "string" || t.a === t.b || !present.has(t.a) || !present.has(t.b)) return;
+            const k = tkey(t.a, t.b);
+            const clean = { a: t.a, b: t.b, label: str(t.label, 60) };
+            const i = T.threads.findIndex((o) => tkey(o.a, o.b) === k);
+            if (i >= 0) T.threads[i] = clean;
+            else T.threads.push(clean);
+        });
+        const fdel = new Set(arr(op.fdel, 100));
+        if (fdel.size) T.frames = T.frames.filter((f) => !fdel.has(f.id));
+        arr(op.fset, 100).forEach((raw) => {
+            const f = cleanFrame(raw);
+            if (!f) return;
+            const i = T.frames.findIndex((o) => o.id === f.id);
+            if (i >= 0) T.frames[i] = f;
+            else if (T.frames.length < 100) T.frames.push(f);
+        });
+        if (typeof op.name === "string" && typeof T.name === "string") T.name = str(op.name, 60).trim() || T.name;
+    }
+
+    // a change from someone else on this board. Undo history gets the same change,
+    // so undoing your own last step never takes back theirs.
+    function applyRemote(op) {
+        if (!op || typeof op !== "object" || readonly) return;
+        applyOp(B, op);
+        const rebase = (s) => {
+            try {
+                const d = JSON.parse(s);
+                applyOp(d, op);
+                return JSON.stringify(d);
+            } catch (e) {
+                return s;
+            }
+        };
+        undoStack = undoStack.map(rebase);
+        redoStack = redoStack.map(rebase);
+        reindex();
+        if (guest || shared) q("#pb-shared-name").textContent = B.name;
+        save();
+    }
+
+    // someone is dragging cards: move them on screen only (their drop sends the real change)
+    function previewMoves(list) {
+        if (board.hidden || !Array.isArray(list)) return;
+        const moved = [];
+        list.slice(0, 200).forEach((m) => {
+            if (!Array.isArray(m)) return;
+            const [id, l, t] = m;
+            const g = typeof id === "string" && geo.get(id);
+            const el = g && cardEl(id);
+            if (!el || !Number.isFinite(l) || !Number.isFinite(t) || el.classList.contains("is-held") || el.classList.contains("is-carried")) return;
+            el.style.left = `${l}px`;
+            el.style.top = `${t}px`;
+            g.l = l;
+            g.t = t;
+            moved.push(id);
+        });
+        if (moved.length) drawStrings(moved);
     }
 
     q("#pb-keep").addEventListener("click", () => {
@@ -3404,11 +3574,7 @@
         let name = copy.name;
         if (index.list.some((b) => b.name === name)) name = `${name} (shared)`;
         copy.name = name.slice(0, 60);
-        readonly = false;
-        shared = null;
-        leavePath();
-        board.classList.remove("is-readonly");
-        sharedBar.hidden = true;
+        dropShared();
         store.set(bkey(id), copy);
         index.list.push({ id, name: copy.name, updated: Date.now() });
         changed(id);
@@ -3445,11 +3611,12 @@
         const toBoard = (x) => cleanBoard({ ...x.data, name: x.name }, "Shared board");
         // password-protected (#19): ask once the wall is up, then fetch the board (share.js)
         if (s?.locked && typeof s.code === "string") {
-            const ctx = { code: s.code, password: null };
+            const ctx = { code: s.code, password: null, editable: false };
             return showShared(async () => {
                 const got = await window.share?.unlock(s.code);
                 if (got?.data && typeof got.data === "object") {
                     ctx.password = got.password || null;
+                    ctx.editable = got.editable === true;
                     return toBoard(got);
                 }
                 leavePath();
@@ -3460,11 +3627,12 @@
             leavePath();
             return toast(s?.error ? "Couldn't load that shared board. Try the link again in a moment." : "That shared board doesn't exist any more. Its owner may have deleted it.", "warn");
         }
-        showShared(toBoard(s), typeof s.code === "string" ? { code: s.code, password: null } : null);
+        showShared(toBoard(s), typeof s.code === "string" ? { code: s.code, password: null, editable: s.editable === true } : null);
     }
 
     // `source` is the board, or an async function that gives it (null: give up).
-    // `ctx` is the /b/ link's { code, password } (none for #board= links: no comments there)
+    // `ctx` is the /b/ link's { code, password, editable } (none for #board= links: no comments
+    // or editing there). live.js turns an editable one into a shared editing session (#21).
     function showShared(source, ctx = null) {
         // wait for the first page so the canvas (which hosts the board) can open
         const t0 = Date.now();
@@ -3749,7 +3917,7 @@
     /* ---------- sync ---------- */
     // another tab changed boards
     window.addEventListener("storage", (e) => {
-        if (readonly || !e.key) return;
+        if (away() || !e.key) return;
         if (e.key === INDEX) {
             const next = store.get(INDEX);
             if (next && Array.isArray(next.list) && next.list.length) {
@@ -3771,6 +3939,19 @@
     syncCount();
 
     /* ---------- for cloud.js: read and apply boards without echoing changes back ---------- */
+    // the same board, whatever order its items are in (an editor's save puts uploads last, #21)
+    function sameBoard(a, b) {
+        const by = (k) => (x, y) => (k(x) < k(y) ? -1 : k(x) > k(y) ? 1 : 0);
+        const canon = (d) =>
+            JSON.stringify([
+                d.name,
+                [...d.pins].sort(by((x) => x.id)),
+                [...d.threads].sort(by((t) => tkey(t.a, t.b))),
+                [...d.frames].sort(by((f) => f.id)),
+            ]);
+        return canon(a) === canon(b);
+    }
+
     function afterIndexChange() {
         if (!index.list.some((b) => b.id === index.active)) {
             index.active = index.list[0].id;
@@ -3789,14 +3970,20 @@
         put(id, data, updated) {
             if (!ID_RE.test(id)) return;
             const clean = cleanBoard(data, "Untitled board");
+            // the same board as on screen (an editor saved what live edits already showed here, #21):
+            // keep the undo history and don't redraw
+            const same = id === index.active && !away() && sameBoard(clean, B);
             if (!store.set(bkey(id), clean)) return;
             const meta = index.list.find((b) => b.id === id);
             if (meta) Object.assign(meta, { name: clean.name, updated });
             else index.list.push({ id, name: clean.name, updated });
-            if (id === index.active && !readonly) {
+            if (id === index.active && !away() && !same) {
                 const typing = document.activeElement?.closest?.(".pb-note, .pb-frame-title, #pb-name");
                 loadActive();
-                if (!typing) undoStack = redoStack = [];
+                if (!typing) {
+                    undoStack = [];
+                    redoStack = [];
+                }
                 syncUndo();
             }
             afterIndexChange();
@@ -3843,6 +4030,20 @@
         syncLightbox,
         isBoardOpen: () => !board.hidden,
         openBoard,
+        // back from signing in with the board open (cloud.js): open it again once the wall is up
+        reopen() {
+            const t0 = Date.now();
+            const wait = setInterval(() => {
+                const ready = state.photos.length && !document.body.classList.contains("is-loading") && window.canvasView?.open;
+                if (!ready && Date.now() - t0 < 15000) return;
+                clearInterval(wait);
+                if (!ready || !board.hidden || away()) return;
+                const wasOpen = window.canvasView.isOpen;
+                if (!wasOpen) window.canvasView.open();
+                // the wall's opening animation runs first, as when opening it by hand
+                setTimeout(() => board.hidden && openBoard(), wasOpen || reduceMotion ? 0 : 1100);
+            }, 100);
+        },
         closeBoard,
         local,
         // for comments.js (#20)
@@ -3862,6 +4063,24 @@
         setCommentCounts(map) {
             commentCounts = map instanceof Map ? map : new Map();
             if (!board.hidden) render();
+        },
+        // for live.js (#21): editing together
+        live: {
+            // what's on screen: { shared: { code, password, editable } } on a /b/ link, { boardId } on
+            // your own board, or null (board closed, or a #board= link)
+            target: () => (board.hidden ? null : shared ? { shared: { ...shared } } : readonly ? null : { boardId: index.active }),
+            isGuest: () => guest,
+            // the board on screen; read it, don't change it
+            board: () => B,
+            apply: applyRemote,
+            preview: previewMoves,
+            enterGuest,
+            resetGuest,
+            leaveGuest,
+            sharedMode: setSharedMode,
+            onView: (fn) => viewHooks.add(fn),
+            view: () => ({ ...view }),
+            worldAt,
         },
     };
 })();

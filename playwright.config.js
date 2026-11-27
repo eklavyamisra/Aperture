@@ -2,7 +2,8 @@
 //   npm run test:e2e
 import { defineConfig, devices } from "@playwright/test";
 
-const PORT = 4173;
+// TEST_PORT lets a second checkout (a git worktree) run its tests while another one is running
+const PORT = Number(process.env.TEST_PORT) || 4173;
 // CI runners have no GPU: let Chromium fall back to software WebGL for the canvas wall
 const SOFTWARE_GL = !!process.env.CI || !!process.env.SOFTWARE_GL;
 

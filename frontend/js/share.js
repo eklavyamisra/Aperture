@@ -2,7 +2,8 @@
    APERTURE — share panel (roadmap #18–19)
    Signed in, the board's Share button opens this panel: make a short
    /b/<code> link, copy it, choose who can open it (anyone with the link,
-   or only people with a password), swap it for a new link (the old one
+   or only people with a password), whether they can only view or also
+   edit with you, live (#21, live.js), swap it for a new link (the old one
    stops working) or stop sharing. The calls are window.cloud.share.
 
    Visitors who open a password-protected link get the "unlock" view of
@@ -24,6 +25,8 @@
         copy: q("#share-copy"),
         anyone: q("#share-anyone"),
         withPass: q("#share-withpass"),
+        view: q("#share-view"),
+        edit: q("#share-edit"),
         passForm: q("#share-pass-form"),
         pass: q("#share-pass"),
         passSave: q("#share-pass-save"),
@@ -37,7 +40,7 @@
     let returnFocus = null;
     let onClose = null; // the visitor closed the prompt: the waiting unlock() gets null
     let board = null; // { boardId, skipped } for the owner panel
-    let link = null; // { url, code, protected } or null when not shared
+    let link = null; // { url, code, protected, editable } or null when not shared
     let choosing = false; // "password" picked, none saved yet
     let busy = false;
 
@@ -85,17 +88,29 @@
             el.passForm.hidden = !wantPass;
             el.passSave.textContent = link.protected ? "Change" : "Set password";
             el.pass.placeholder = link.protected ? "New password" : "Password (4 or more characters)";
-            el.status.textContent = link.protected
-                ? "Only people with the link and the password can view this board."
-                : "Anyone with the link can view this board, but not change it.";
+            el.view.checked = !link.editable;
+            el.edit.checked = link.editable;
+            if (link.editable) {
+                el.status.textContent = `${link.protected ? "People with the link and the password" : "Anyone with the link"} can view this board. Once they sign in, they can edit it with you.`;
+            } else {
+                el.status.textContent = link.protected
+                    ? "Only people with the link and the password can view this board."
+                    : "Anyone with the link can view this board, but not change it.";
+            }
         }
         const n = board?.skipped || 0;
-        el.note.textContent = `${on ? "Viewers see your edits once they've synced. " : ""}${n ? `${n} uploaded image${n === 1 ? " isn't" : "s aren't"} shown on shared boards.` : ""}`.trim();
+        const lead = !on ? "" : link.editable ? "Everyone on the board sees changes as they're made. " : "Viewers see your edits once they've synced. ";
+        const skipped = n ? `${n} uploaded image${n === 1 ? " isn't" : "s aren't"} shown on shared boards${on && link.editable ? ", and editors can't add their own" : ""}.` : "";
+        el.note.textContent = `${lead}${skipped}`.trim();
     }
 
     function fail(err) {
         const m = String(err?.message || err || "");
-        el.error.textContent = /4 to 72/.test(m) ? "Use a password of 4 to 72 characters." : "That didn't work. Check your connection and try again.";
+        el.error.textContent = /4 to 72/.test(m)
+            ? "Use a password of 4 to 72 characters."
+            : /can_edit|room/.test(m)
+              ? "Editing together isn't set up in the database yet. Run the latest schema.sql in Supabase, then try again."
+              : "That didn't work. Check your connection and try again.";
         window.reportProblem?.("share panel", err);
     }
 
@@ -174,6 +189,14 @@
             choosing = false;
             render();
             window.toast?.("Password set. Send it separately from the link.");
+        }
+    });
+
+    // #21: view only, or edit together (people who edit have to sign in)
+    el.view.addEventListener("change", () => link?.editable && run((id) => window.cloud.share.setEditable(id, false)));
+    el.edit.addEventListener("change", async () => {
+        if (link && !link.editable && (await run((id) => window.cloud.share.setEditable(id, true)))) {
+            window.toast?.("People who open the link can now sign in and edit with you.");
         }
     });
 

@@ -9,7 +9,7 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 | 0 | Fix before more users arrive | ✅ 4 of 5 (approval left until needed) |
 | 1 | Make the board useful without Unsplash | ✅ 9 of 9 |
 | 2 | Accounts and the cloud (paid tier starts here) | ✅ 6 of 6 (Supabase; #20 needs the updated schema run) |
-| 3 | Teams and money | ⬜ |
+| 3 | Teams and money | 🟡 1 of 6 (#21 built; needs the updated schema run) |
 | Alongside | Growth and quality | 🟡 3 of 5 |
 
 ## Phase 0: Fix before more users arrive
@@ -55,7 +55,7 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 
 | # | Item | Size | Status |
 |---|---|---|---|
-| 21 | Real-time collaboration (live cursors, editing together) | L | ⬜ |
+| 21 | Real-time collaboration (live cursors, editing together) | L | ✅ built; live once the updated `schema.sql` is run and Realtime's "Allow public access" is off (README step 9). Share panel → "Edit with you": signed-in people with the link (and password, if set) edit together over a private Supabase Realtime channel. Changes go item by item, with avatars, cursors and cards moving while dragged. Editors save into the owner's board; they can't add device images or see the owner's uploads. Turning editing off, a new link or a new password removes editors. Invite-by-email waits for #24 |
 | 22 | Presentation mode (walk through groups like slides) | M | ⬜ |
 | 23 | PDF export | M | ⬜ |
 | 24 | Team workspaces and roles | M | ⬜ |
@@ -81,7 +81,9 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 
 ## Suggested next steps
 
-1. Phase 3: #21 real-time collaboration is the big one; #24 teams and #25 billing wait on the pricing decision.
+1. Phase 3: #21 is built (run the schema, then turn off Realtime's public access). Next: #22 presentation mode and #23 PDF export (client-only);
+   #24 teams and #25 billing wait on the pricing decision. Follow-ups to #21: editors' own uploads (would need a shared bucket),
+   a per-item merge for notes typed by two people at once (now the last edit wins), and live comments over the same channel.
    Follow-ups to #15–20: comment notifications (email or an unread count), live comments instead of the 20 s refresh, full account deletion from inside the app (needs a server key), live updates instead of the 45 s sync check,
    and showing uploaded images on shared boards (signed URLs from the private bucket).
 2. #27 landing page and waitlist (can share the same backend for storing emails).
