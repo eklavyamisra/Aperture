@@ -171,6 +171,7 @@ test("board page: fills the preview tags and embeds the board", async () => {
     assert.equal(board.name, sample.name);
     assert.equal(board.data.pins.length, 4);
     assert.equal(board.data.pins[2].note, sample.data.pins[2].note);
+    assert.equal(board.editable, false); // view-only unless the row says otherwise
 });
 
 test("board page: a board without Unsplash photos uses the site image", async () => {
@@ -279,6 +280,15 @@ test("board unlock: right password gives the board, wrong ones don't", async () 
 
     const gone = await boardUnlock(post({ code: "ZzZzZz9999", password: PASS }), find);
     assert.equal(gone.status, 404);
+});
+
+test("board page and unlock: an edit link says so (#21), and only a real true counts", async () => {
+    const page = async (editable) => embedded(await (await boardRespond(new Request("https://aperture.example/b/AbCdEf1234"), async () => ({ ...sample, editable }))).text());
+    assert.equal((await page(true)).editable, true);
+    assert.equal((await page("true")).editable, false);
+    assert.equal((await page(null)).editable, false);
+    const ok = await boardUnlock(post({ code: "AbCdEf1234", password: PASS }), async () => ({ status: "ok", ...sample, editable: true }));
+    assert.equal((await ok.json()).editable, true);
 });
 
 test("board unlock: rejects malformed requests without a lookup", async () => {

@@ -2353,6 +2353,119 @@ input[type="search"]::-webkit-search-cancel-button {
     font-size: 11px;
 }
 
+.pb-shared #pb-shared-signin {
+    margin-left: auto;
+    background: transparent;
+    color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+@media (pointer: coarse) {
+    .pb-shared button {
+        min-height: 44px;
+    }
+}
+
+/* ---------- editing together (#21) ---------- */
+/* an editor on someone else's board: their boards, Share and Delete aren't theirs to use here */
+.pb.is-guest .pb-switch,
+.pb.is-guest #pb-share {
+    display: none !important;
+}
+
+.pb-people {
+    display: flex;
+    align-items: center;
+    margin: 0;
+    padding: 0 4px;
+    list-style: none;
+}
+
+.pb-people[hidden] {
+    display: none;
+}
+
+/* phones: the toolbar scrolls sideways, so who's here goes first, where it's seen */
+@media (max-width: 760px) {
+    .pb-people {
+        order: -1;
+        flex: none;
+    }
+}
+
+.pb-person {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    margin-left: -6px;
+    border-radius: 50%;
+    background: var(--c, var(--accent));
+    box-shadow: 0 0 0 2px var(--bg);
+    color: var(--bg);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: default;
+}
+
+.pb-person:first-child {
+    margin-left: 0;
+}
+
+.pb-person.is-more {
+    background: var(--paper);
+    font-size: 10px;
+}
+
+.pb-cursors {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 30;
+}
+
+.pb-cursor {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transition: transform 0.08s linear, opacity 0.4s ease;
+    will-change: transform;
+}
+
+.pb-cursor svg {
+    display: block;
+    fill: var(--c, var(--accent));
+    stroke: var(--bg);
+    stroke-width: 1.2;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+}
+
+.pb-cursor span {
+    position: absolute;
+    left: 14px;
+    top: 16px;
+    max-width: 160px;
+    overflow: hidden;
+    padding: 3px 8px;
+    border-radius: 100px;
+    background: var(--c, var(--accent));
+    color: var(--bg);
+    font: 500 11px/1.3 var(--sans);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pb-cursor.is-idle {
+    opacity: 0.25;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pb-cursor {
+        transition: none;
+    }
+}
+
 .pb.is-readonly .pb-edit,
 .pb.is-readonly .pb-acts [data-act="remove"],
 .pb.is-readonly .pb-frame-grip,

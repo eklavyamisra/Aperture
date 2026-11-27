@@ -7,7 +7,9 @@
    user's id. A board can also get a short share link (/b/<code>, #18)
    that always shows its latest synced copy, optionally behind a password
    (#19). The Share panel for that is share.js; this holds the calls, and
-   the ones for comments on shared boards (#20, comments.js).
+   the ones for comments on shared boards (#20, comments.js) and for
+   editing a shared board together (#21, live.js: edit links, saving,
+   the private Realtime channel).
 
    Off unless /api/config returns Supabase settings: then the account
    button stays hidden and nothing here runs. Tests swap in their own
@@ -71,9 +73,15 @@
             if (error) throw error;
             return data;
         };
-        // after signing in, come back to the shared board being viewed (needs
-        // "<site>/b/*" in Supabase's Redirect URLs; otherwise Supabase uses the site root)
-        const back = () => `${location.origin}${location.pathname.startsWith("/b/") ? location.pathname : "/"}`;
+        // Signing in leaves the page (email link, Google) and comes back as a fresh load. Come
+        // back to the same place: the shared board, or the search and wall view in the address
+        // (needs "<site>/**" in Supabase's Redirect URLs; otherwise Supabase uses the site root).
+        // Whether the board was open isn't in the address, so it's noted for afterwards.
+        const back = () => {
+            remember();
+            if (location.pathname.startsWith("/b/")) return `${location.origin}${location.pathname}`;
+            return `${location.origin}/${location.search}`;
+        };
         return {
             async session() {
                 return who(must(await sb.auth.getSession()).session);
@@ -113,8 +121,47 @@
                 return error ? null : data;
             },
             async findShare(boardId) {
-                const rows = must(await sb.from("shares").select("code, protected").eq("board_id", boardId).limit(1));
-                return rows[0] || null;
+                let r = await sb.from("shares").select("code, protected, can_edit, room").eq("board_id", boardId).limit(1);
+                // the database doesn't have #21's columns yet (schema.sql not re-run): links still work, view-only
+                if (r.error && /can_edit|room/.test(r.error.message || "")) r = await sb.from("shares").select("code, protected").eq("board_id", boardId).limit(1);
+                return must(r)[0] || null;
+            },
+            async setShareEditable(boardId, on) {
+                must(await sb.from("shares").update({ can_edit: !!on }).eq("board_id", boardId));
+            },
+            // #21: editing together
+            async joinBoard(code, password) {
+                const rows = must(await sb.rpc("join_board", { share_code: code, password: password ?? null }));
+                return rows?.[0] || null;
+            },
+            async liveBoard(room) {
+                const rows = must(await sb.rpc("live_board", { room_id: room }));
+                return rows?.[0] || null;
+            },
+            async saveLive(room, data, edited) {
+                return must(await sb.rpc("save_live_board", { room_id: room, board: data, edited }));
+            },
+            // A private Realtime channel for one board (the database lets in only its
+            // owner and editors). h: { message(event, payload), presence(list), ready(), error(why) }
+            channel(room, me, h) {
+                const ch = sb.channel(`board:${room}`, { config: { private: true, broadcast: { self: false }, presence: { key: me.sid } } });
+                let left = false;
+                ch.on("broadcast", { event: "*" }, (m) => h.message(m.event, m.payload));
+                ch.on("presence", { event: "sync" }, () => h.presence(Object.values(ch.presenceState()).map((a) => a[0])));
+                ch.subscribe(async (status, err) => {
+                    if (left) return;
+                    if (status === "SUBSCRIBED") {
+                        await ch.track(me);
+                        h.ready();
+                    } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") h.error(String(err?.message || status));
+                });
+                return {
+                    send: (event, payload) => ch.send({ type: "broadcast", event, payload }),
+                    leave() {
+                        left = true;
+                        sb.removeChannel(ch);
+                    },
+                };
             },
             async createShare(code, boardId) {
                 must(await sb.from("shares").insert({ code, board_id: boardId, owner: user.id }));
@@ -292,13 +339,15 @@
         return out;
     }
 
-    const linkOf = (row) => (row ? { url: `${location.origin}/b/${row.code}`, code: row.code, protected: !!row.protected } : null);
+    const linkOf = (row) => (row ? { url: `${location.origin}/b/${row.code}`, code: row.code, protected: !!row.protected, editable: !!row.can_edit, room: row.room || null } : null);
+    // live.js reconnects (or leaves) when the owner changes who can edit
+    const shareChanged = (boardId) => document.dispatchEvent(new CustomEvent("share:changed", { detail: { boardId } }));
 
     function needAccount() {
         if (!user || !backend?.createShare) throw new Error("not signed in");
     }
 
-    // Each returns this board's link as { url, code, protected }, or null when it isn't shared.
+    // Each returns this board's link as { url, code, protected, editable, room }, or null when it isn't shared.
     const share = {
         async get(boardId) {
             needAccount();
@@ -320,25 +369,56 @@
             return linkOf(await backend.findShare(boardId));
         },
         // a new address for the same board: the old link stops working, the password stays
+        // (editors are removed by the database: they need the new link)
         async renew(boardId) {
             needAccount();
+            await window.live?.ending?.(boardId, "link");
             await backend.renameShare(boardId, newCode());
+            shareChanged(boardId);
             return linkOf(await backend.findShare(boardId));
         },
-        // null removes the password
+        // null removes the password (either way, editors need to open the link again)
         async setPassword(boardId, password) {
             needAccount();
+            await window.live?.ending?.(boardId, "link");
             await backend.setSharePassword(boardId, password);
+            shareChanged(boardId);
+            return linkOf(await backend.findShare(boardId));
+        },
+        // #21: signed-in people with the link can edit, or only view.
+        // Editors hear that it's ending first, while they can still be told.
+        async setEditable(boardId, on) {
+            needAccount();
+            if (!on) await window.live?.ending?.(boardId, "off");
+            await backend.setShareEditable(boardId, on);
+            shareChanged(boardId);
             return linkOf(await backend.findShare(boardId));
         },
         async stop(boardId) {
             needAccount();
+            await window.live?.ending?.(boardId, "off");
             await backend.deleteShare(boardId);
+            shareChanged(boardId);
             return null;
         },
     };
 
     /* ---------- sign in / out ---------- */
+
+    // Where the person was when they asked to sign in. Kept in localStorage, not sessionStorage,
+    // because the email link opens a new tab. An hour covers the email link's lifetime.
+    const RETURN = "aperture:return";
+    function remember() {
+        write(RETURN, { board: !!window.pins?.isBoardOpen?.(), at: Date.now() });
+    }
+
+    // back from signing in: open the board again if it was open (a /b/ page opens its own)
+    function returnToBoard() {
+        const r = read(RETURN, null);
+        write(RETURN, null);
+        if (!r?.board || Date.now() - r.at > 3600e3 || location.pathname.startsWith("/b/")) return;
+        window.pins?.reopen?.();
+    }
 
     async function signedIn(u) {
         const first = !user;
@@ -353,6 +433,7 @@
         write(OWNER, u.id);
         render();
         if (first) {
+            returnToBoard();
             if (!owner) window.toast?.(`Signed in as ${u.email}. Your boards on this device are moving to your account.`);
             await sync();
             poll();
@@ -554,6 +635,33 @@
         },
     };
 
-    window.cloud = { sync, share, comments, state: () => state, user: () => user, open, close };
+    /* ---------- editing together (#21, live.js) ---------- */
+    const live = {
+        available: () => !!backend?.channel && !!user,
+        // { room, name, data, updated }, or throws with .status (view, locked, wrong, slow, gone)
+        async join(code, password) {
+            needAccount();
+            const row = await backend.joinBoard(code, password);
+            if (!row) throw Object.assign(new Error("gone"), { status: "gone" });
+            if (row.status !== "ok") throw Object.assign(new Error(row.status), { status: row.status });
+            return row;
+        },
+        async board(room) {
+            needAccount();
+            const row = await backend.liveBoard(room);
+            if (!row) throw Object.assign(new Error("not allowed"), { status: "gone" });
+            return row;
+        },
+        async save(room, data, edited) {
+            needAccount();
+            return Number(await backend.saveLive(room, data, edited)) || edited;
+        },
+        channel(room, me, handlers) {
+            needAccount();
+            return backend.channel(room, me, handlers);
+        },
+    };
+
+    window.cloud = { sync, share, comments, live, state: () => state, user: () => user, open, close };
     start();
 })();

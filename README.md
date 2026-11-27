@@ -52,7 +52,10 @@ Accounts stay switched off until these are done; the site works local-only meanw
 7. When `schema.sql` changes (for example the `shares` table and `shared_board()` for short share links,
    or `comments` for #20), paste and run it again. It's safe to re-run.
 8. **Authentication → URL Configuration → Redirect URLs**: add `https://aperture-bice-nine.vercel.app/b/*`
-   (and `http://localhost:5173/b/*`), so signing in to comment on a shared board returns to that board.
+   (and `http://localhost:5173/b/*`), so signing in to comment on (or edit) a shared board returns to that board.
+9. **Realtime → Settings**: turn off **Allow public access**, so only private channels work. Live editing (#21)
+   uses a private channel per board, and the policies in `schema.sql` let in only the board's owner and the
+   people who opened its edit link.
 
 ## After the first deploy
 

@@ -1,7 +1,7 @@
 // The page behind a short share link (roadmap #18, passwords #19).
 //
 //   GET  /b/<code>     (vercel.json rewrites it to /api/board?code=<code>)
-//   POST /api/board    { code, password } -> { name, data } for a password-protected board
+//   POST /api/board    { code, password } -> { name, data, editable } for a password-protected board
 //
 // Link previews (WhatsApp, iMessage, Slack, X) don't run JavaScript, so this
 // serves the app's own index.html with the board's name, a short description
@@ -32,7 +32,7 @@ async function template(origin) {
     return (fetched = await r.text());
 }
 
-// { status: ok | locked | wrong | slow, name, data } or null when there's no such board
+// { status: ok | locked | wrong | slow, name, data, editable } or null when there's no such board
 async function lookup(code, password = null) {
     const sb = supabaseEnv();
     if (!sb) return null;
@@ -89,7 +89,7 @@ export function fill(html, { origin, code, board, locked = false, failed = false
     const url = `${origin}/b/${code}`;
     let payload, name, desc;
     if (board) {
-        payload = { code, name: board.name, data: board.data };
+        payload = { code, name: board.name, data: board.data, editable: board.editable };
         name = board.name;
         desc = describe(board.data.pins);
     } else if (locked) {
@@ -127,7 +127,8 @@ const codeOf = (url) => url.searchParams.get("code") || url.pathname.match(/^\/b
 function toBoard(row) {
     if (!row?.data || typeof row.data !== "object") return null;
     const pins = Array.isArray(row.data.pins) ? row.data.pins : [];
-    return { name: clean(row.name || row.data.name, 60) || "Shared board", data: { ...row.data, pins } };
+    // editable: signed-in people with the link can edit it together (#21)
+    return { name: clean(row.name || row.data.name, 60) || "Shared board", data: { ...row.data, pins }, editable: row.editable === true };
 }
 
 const fail = (what, err) => console.error(`[share] ${what}:`, String(err?.message || err).slice(0, 200));
@@ -135,7 +136,7 @@ const fail = (what, err) => console.error(`[share] ${what}:`, String(err?.messag
 export const GET = (request) => respond(request);
 export const POST = (request) => unlock(request);
 
-// `find(code, password?)` gives { status, name, data } or null; the browser tests pass a stand-in
+// `find(code, password?)` gives { status, name, data, editable } or null; the browser tests pass a stand-in
 export async function respond(request, find = lookup) {
     const url = new URL(request.url);
     const code = codeOf(url);

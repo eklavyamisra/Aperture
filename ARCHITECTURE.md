@@ -19,6 +19,7 @@ flowchart LR
         CLOUD[cloud.js<br/>sign-in + sync]
         SHARE[share.js<br/>share panel]
         COMM[comments.js<br/>comments panel]
+        LIVE[live.js<br/>editing together]
         LS[(localStorage<br/>boards, views)]
         IDB[(IndexedDB<br/>uploaded images)]
     end
@@ -32,8 +33,9 @@ flowchart LR
     end
     subgraph Supabase
         AUTH[Auth<br/>email link, Google]
-        DB[(Postgres<br/>boards, shares, comments)]
+        DB[(Postgres<br/>boards, shares, comments, editors)]
         BUCKET[(Storage<br/>uploads bucket)]
+        RT[Realtime<br/>private board:room channels]
     end
     UNS[api.unsplash.com]
     IMG[images.unsplash.com]
@@ -56,6 +58,9 @@ flowchart LR
     SHARE -->|POST /api/board password| BOARD
     COMM --> CLOUD
     COMM <-->|pins.commentTarget, badges| PINS
+    LIVE <-->|pins:edit / pins.live.apply| PINS
+    LIVE -->|join, save, channel| CLOUD
+    CLOUD <-->|owner + editors only| RT
 ```
 
 ## Repository layout
@@ -76,6 +81,7 @@ frontend/            the site, served as-is (Vercel's output directory)
     cloud.js         accounts and cloud sync (window.cloud)
     share.js         Share panel: short links, passwords, new link, stop sharing; visitors' password prompt
     comments.js      comments panel on shared boards and on your own board; card badges (window.comments)
+    live.js          editing a shared board together: changes, people, cursors, drag previews (window.live)
   img/               og.jpg (link preview), favicon.svg
   pages/             privacy.html, terms.html (served at /privacy and /terms)
 backend/
@@ -102,7 +108,7 @@ index.html (root)    redirect from the old GitHub Pages URL
 
 Classic `<script>` files, each wrapped in an IIFE, loaded in this order:
 GSAP + ScrollTrigger + Flip + Lenis (CDN) → `js/api.js` → `js/media.js` → `js/pins.js` → `js/tour.js` →
-`js/cloud.js` → `js/share.js` → `js/comments.js` → `js/canvas.js` (`js/errors.js` loads first, in `<head>`).
+`js/cloud.js` → `js/share.js` → `js/comments.js` → `js/live.js` → `js/canvas.js` (`js/errors.js` loads first, in `<head>`).
 
 - **`api.js`** defines the shared globals the others rely on: `state` (current mode, query, filters,
   `photos`, paging token), `q`/`qa`, `api(path, params)`, `openLightbox`, `lb`, `lightbox`, `gsap`,
@@ -121,7 +127,7 @@ GSAP + ScrollTrigger + Flip + Lenis (CDN) → `js/api.js` → `js/media.js` → 
   `/api/config` says accounts are set up.
 
 Modules talk through these globals and a few window APIs: `window.pins`, `window.canvasView`,
-`window.media`, `window.toast`, `window.reportProblem`, `window.tour`, `window.cloud`.
+`window.media`, `window.toast`, `window.reportProblem`, `window.tour`, `window.cloud`, `window.live`.
 
 ## Board data
 
@@ -204,8 +210,50 @@ links, signed out on your own board), and reloads on `pins:context`, `pins:open`
 It refreshes every 20 s while the board is open. A comment can be about one card (`item_id`): the card
 menu ("Comment on this card…", also in view-only mode, by long press on touch), `C` on a focused card,
 or the card's count badge opens the panel anchored to it. Names are what the commenter types (prefilled
-from their Google name or email), never the email itself. Signing in from a `/b/` page returns to it
-(needs `<site>/b/*` in Supabase's Redirect URLs).
+from their Google name or email), never the email itself.
+
+Signing in (email link or Google) leaves the page and comes back as a fresh load. `cloud.js` asks
+to come back to the same place: the `/b/` page, or `/` with the current search and wall view
+(`?q=…&view=canvas`). Whether the board was open is noted in `aperture:return` (localStorage,
+because the email link opens a new tab; good for an hour), and `pins.reopen()` opens it again once
+the wall is up. Needs `<site>/**` in Supabase's Redirect URLs.
+
+## Editing together (#21)
+
+The Share panel's *What they can do* sets `shares.can_edit`. On an edit link, a signed-in visitor (with
+the password, if there is one) calls `join_board(code, password)`, which records them in
+`board_editors` and returns the board minus uploads plus the share's `room`: a random id that only
+the owner (column access on `shares`) and editors ever see. Signed out, the shared bar offers
+*Sign in to edit*.
+
+- **Channel:** a private Supabase Realtime channel `board:<room>`. The policies on `realtime.messages`
+  call `can_use_room(room)`, which is true only for the owner and the board's editors, and only while
+  the share allows editing. Realtime's *Allow public access* must be off (README step 9).
+- **Changes:** every edit goes through `persist()` in `pins.js`, which fires `pins:edit`. `live.js`
+  waits 60 ms, compares the board with what it last sent (items, threads and frames by key, as
+  JSON) and broadcasts only the difference: `{ set, del, tset, tdel, fset, fdel, name }`. Uploads and
+  threads tied to them are never sent. Incoming changes go through `pins.live.apply()`, which uses
+  `cleanItem` and the same checks as `cleanBoard`, and applies the same change to the undo and redo
+  snapshots, so undo takes back only your own steps. On the same item, the last change wins.
+- **Presence:** each tab tracks `{ sid, uid, name, color, owner }`. The header shows the others
+  (`#pb-people`; your own account on other devices is left out). Cursors are sent in board
+  coordinates (mouse and pen only, 50 ms apart) and drawn in a layer kept in place through
+  `pins.live.onView`. While cards are carried, `pins.js` passes their positions to
+  `live.dragging()` (50 ms apart), and others see them move. The drop sends the real change.
+- **Saving:** the owner's copy syncs as usual (`cloud.js`). Editors (`guest` in `pins.js`: nothing is
+  written to their device's boards) save the whole board 0.8 s after a change through
+  `save_live_board(room, board, edited)`. It keeps the stored copy's uploads and their threads,
+  and sets `updated` past the stored one. When the owner's sync pulls a copy identical to what's on
+  screen, `pins.local.put` keeps the undo history.
+- **Joining:** the person who has been there longest sends a newcomer the board (`state`, if under
+  250 KB). Otherwise the newcomer reads `live_board(room)` after 1.5 s. A new arrival also prompts
+  everyone to save what's pending.
+- **Ending:** before the owner turns editing off, makes a new link, changes the password or stops
+  sharing, `cloud.js` asks `live.ending()` to tell editors (`end`), while the database still lets the
+  owner send. The `shares_drop_editors` trigger then removes the editors. Editors drop back to view-only,
+  keeping what's on screen. If an editor's save is refused, that ends their editing too.
+- Editors can't add images from their device (the image would only exist on that device). They can add
+  photos, notes and links.
 
 ## Accounts and sync
 
@@ -217,8 +265,9 @@ Supabase holds these, all locked to their owner by row-level security
   JSON), `updated` (the browser's last-edit time), `deleted` (tombstone).
 - **`uploads` bucket:** private; each person's images live under `<user id>/<item id>`.
 - **`shares` table:** `code`, `owner`, `board_id` (one per board), plus `pass_hash`, `fails`,
-  `fail_window` and a generated `protected` flag. Owners get column-level access only (read
-  `code, protected`; change `code`), so the hash and try counts stay server-side. Nobody can list
+  `fail_window`, a generated `protected` flag, and `can_edit` / `room` for #21. Owners get column-level
+  access only (read `code, protected, can_edit, room`; change `code, can_edit`), so the hash and try
+  counts stay server-side. `board_editors` (closed; functions only) lists who opened an edit link. Nobody can list
   shares; the only public read is `shared_board(code, password)`, a security-definer function that
   returns one live board minus uploads, or a status (`locked`, `wrong`, `slow`).
 
@@ -276,7 +325,13 @@ All backend code is in `backend/api/`. The files in the root `api/` folder only 
 - `tests/cloud.spec.js` also covers comments (owner, signed-out and signed-in visitors, card badges,
   deleting, password-protected boards) against the fake's versions of the comment functions. The
   database functions themselves were checked by loading `schema.sql` into PGlite with stand-ins for
-  Supabase's `auth` / `storage` schemas.
+  Supabase's `auth` / `storage` schemas (and `realtime`, for #21's policies).
+- `tests/cloud.spec.js` also covers editing together (#21): the fake gets edit links, `join_board`,
+  `save_live_board` (keeping uploads) and a Realtime stand-in in the test process that passes broadcasts
+  and presence between the two pages. It checks live notes, deletes, drags, cursors, undo, blocked
+  uploads, password-protected edit links, and editing ending when the owner turns it off or makes a new link.
+- `TEST_PORT=4273 npm run test:e2e` runs the browser tests on another port, for a second checkout (a git
+  worktree) while another test server is running.
 - `tests/supabase-lock.spec.js`: the real Supabase wrapper in `cloud.js` against a stand-in library that,
   like supabase-js, runs auth callbacks inside its lock. Guards against the start-up deadlock (sync stuck
   on "Syncing…"): `cloud.js` reacts to auth changes only after the callback returns.
@@ -294,7 +349,8 @@ Pushing to `main` deploys to Vercel (https://aperture-bice-nine.vercel.app) and 
 - Unsplash demo key: 50 requests/hour across all visitors (CDN caching softens it).
 - The browser copy is still the working copy, so localStorage's ~5 MB limit applies per device; the
   app warns near it. A board row is capped at ~2 MB, and an uploaded image at 15 MB.
-- Sync works per whole board: simultaneous edits to the same board on two devices keep the later one.
-  Live collaboration (Phase 3) would need per-item changes over Supabase Realtime.
+- Sync works per whole board: simultaneous edits to the same board on two devices keep the later one,
+  unless both are on the board's live channel (#21), where changes travel item by item. Two people
+  typing in the same note at once keep whichever was saved last.
 - Deleting the account itself (not just its data) needs the service-role key on the server; for now
   it is done on request.
