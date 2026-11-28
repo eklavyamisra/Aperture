@@ -37,7 +37,11 @@ const lbStage = q("#lb-stage");
 const state = {
     mode: "feed", // "feed" | "search" | "user"
     query: "",
-    user: null, // { username, name } in "user" mode
+    user: null, // { username, name, source } in "user" mode; source "aperture" for a library creator
+    source: "all", // "all" | "aperture" | "unsplash": where feed and search results come from (#33)
+    libEnabled: null, // does this site have a library? (null until /api/library answers)
+    lib: { page: 1, done: false, total: 0 }, // library paging, ahead of Unsplash's
+    unsTotal: 0,
     order: "relevant",
     color: "",
     orientation: "",
@@ -56,6 +60,8 @@ const state = {
 try {
     const saved = parseInt(localStorage.getItem("aperture:density"), 10);
     if ([2, 3, 4].includes(saved)) state.density = saved;
+    const src = localStorage.getItem("aperture:source");
+    if (["all", "aperture", "unsplash"].includes(src)) state.source = src;
 } catch (e) {}
 
 /* ----------------------------------------------------------
@@ -89,7 +95,41 @@ const fmt = (n) => Number(n).toLocaleString("en-US");
 const esc = (s) =>
     String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const utm = (url) => `${url}${url.includes("?") ? "&" : "?"}${UTM}`;
-const imgUrl = (p, w, qual = 75) => `${p.urls.raw}&w=${w}&q=${qual}&auto=format&fit=max`;
+
+/* Photos come from Unsplash (urls.raw is an imgix address that takes size params)
+   or from Aperture's own library (#33): urls.raw is the photo's folder in a public
+   Supabase bucket holding three sizes, s / m / l, at most 640 / 1600 / 3000 px on
+   the long side. photoSrc() gives either one an address for the size wanted;
+   imgix params are passed as an object ({ w, h, fit, crop, q, auto }). */
+const LIB_RAW = /^https:\/\/[a-z0-9]{20}\.supabase\.co\/storage\/v1\/object\/public\/library\/[0-9a-f-]{36}\/ap-[a-z0-9]{12}\/$/;
+const LIB_SIZES = [
+    ["s", 640],
+    ["m", 1600],
+    ["l", 3000],
+];
+const isLibrary = (p) => LIB_RAW.test(p?.urls?.raw || "");
+// a library photo's width at each stored size
+const libWidths = (p) => {
+    const long = Math.max(p.width, p.height) || 1;
+    return LIB_SIZES.map(([k, L]) => [k, Math.round(p.width * Math.min(1, L / long))]);
+};
+function photoSrc(p, params = {}) {
+    if (isLibrary(p)) {
+        const w = +params.w || 700;
+        // a crop to w×h covers the box, so the image must be at least that tall too
+        const need = params.h && p.width && p.height ? Math.max(w, (params.h * p.width) / p.height) : w;
+        const sizes = libWidths(p);
+        const pick = sizes.find(([, sw]) => sw >= need) || sizes[sizes.length - 1];
+        return `${p.urls.raw}${pick[0]}.webp`;
+    }
+    return p.urls.raw + Object.entries(params).map(([k, v]) => `&${k}=${v}`).join("");
+}
+const imgUrl = (p, w, qual = 75) => photoSrc(p, { w, q: qual, auto: "format", fit: "max" });
+const srcsetOf = (p) =>
+    isLibrary(p) ? libWidths(p).map(([k, w]) => `${p.urls.raw}${k}.webp ${w}w`).join(", ") : [400, 700, 1000, 1400].map((w) => `${imgUrl(p, w)} ${w}w`).join(", ");
+// where a photographer's name links to: their Unsplash profile, or their Aperture page
+const profileHref = (p) => (isLibrary(p) ? `/?creator=${p.user.username}` : utm(p.user?.links?.html || "https://unsplash.com"));
+const slugify = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 50) || "photo";
 const photoTitle = (p) => {
     const t = (p.description || p.alt_description || "Untitled frame").trim();
     return t.length > 90 ? t.slice(0, 88).trimEnd() + "…" : t;
@@ -125,7 +165,27 @@ async function api(path, params = {}) {
     return res.json();
 }
 
+// Aperture's own library (#33, backend/api/library.js): { enabled, total, results }
+async function library(params = {}) {
+    const url = new URL("/api/library", location.origin);
+    Object.entries(params).forEach(([k, v]) => v !== "" && v != null && url.searchParams.set(k, v));
+    let res;
+    try {
+        res = await fetch(url);
+    } catch (e) {
+        throw new ApiError(0, "network");
+    }
+    if (!res.ok) throw Object.assign(new ApiError(res.status, res.statusText), { library: true });
+    const data = await res.json();
+    if (!!data.enabled !== state.libEnabled) {
+        state.libEnabled = !!data.enabled;
+        syncSource();
+    }
+    return data;
+}
+
 function describeError(err) {
+    if (err.library) return ["Library closed.", "Aperture’s own photos couldn’t be reached. Try again shortly, or switch to Unsplash."];
     if (err.status === 403 || err.status === 429)
         return ["Out of film.", "Aperture is very popular right now. Give it a few minutes and try again."];
     if (err.status === 401 || err.status === 500) return ["Darkroom closed.", "The server couldn’t talk to Unsplash. Try again shortly."];
@@ -212,12 +272,20 @@ const revealer = new IntersectionObserver(
     { rootMargin: "0px 0px -8% 0px" }
 );
 
+// a creator without a picture gets their initial instead
+function avatarHtml(p, size) {
+    const src = p.user?.profile_image?.[size];
+    if (src) return `<img src="${esc(src)}" alt="" loading="lazy">`;
+    return `<i class="avatar-initial" aria-hidden="true">${esc((p.user?.name || "?").trim().charAt(0).toUpperCase())}</i>`;
+}
+
 function makeCard(p, index, batchIndex) {
     const fig = document.createElement("figure");
     fig.className = "card";
     fig._ratio = p.height / p.width;
     fig.style.setProperty("--c", p.color || "#222");
-    fig.style.setProperty("--lqip", `url("${p.urls.raw}&w=24&q=20&auto=format")`);
+    fig.style.setProperty("--lqip", isLibrary(p) ? "none" : `url("${p.urls.raw}&w=24&q=20&auto=format")`);
+    if (isLibrary(p)) fig.classList.add("is-library");
     fig.style.setProperty("--d", `${Math.min(batchIndex, 8) * 0.06}s`);
 
     const name = p.user?.name || "Unknown";
@@ -227,11 +295,11 @@ function makeCard(p, index, batchIndex) {
     fig.innerHTML = `
         <button class="card-media" data-cursor="View" aria-label="Open “${esc(alt)}” by ${esc(name)}" style="aspect-ratio:${p.width} / ${p.height}">
             <img class="card-img" alt="${esc(alt)}" loading="lazy" decoding="async"
-                srcset="${[400, 700, 1000, 1400].map((w) => `${imgUrl(p, w)} ${w}w`).join(", ")}"
+                srcset="${srcsetOf(p)}"
                 sizes="${n === 1 ? "100vw" : Math.ceil(100 / n) + "vw"}"
                 src="${imgUrl(p, 700)}">
             <span class="card-cap">
-                <span class="card-author"><img src="${p.user?.profile_image?.small || ""}" alt="" loading="lazy"><span>${esc(name)}</span></span>
+                <span class="card-author">${avatarHtml(p, "small")}<span>${esc(name)}</span></span>
                 <span class="card-hex mono">${esc((p.color || "").toUpperCase())}</span>
             </span>
         </button>
@@ -252,29 +320,80 @@ function makeCard(p, index, batchIndex) {
 /* ----------------------------------------------------------
    Data loading
 ---------------------------------------------------------- */
+/* Where results come from (#33). A creator's page is library only, a photographer's
+   is Unsplash only. Otherwise it's the source switch: "all" lists the library's
+   matches first, then Unsplash's. A site without a library is Unsplash only. */
+const fromLibrary = () => (state.mode === "user" ? state.user?.source === "aperture" : state.source !== "unsplash" && state.libEnabled !== false);
+const fromUnsplash = () => (state.mode === "user" ? state.user?.source !== "aperture" : state.source !== "aperture" || state.libEnabled === false);
+const unsplashMore = () => (state.mode === "feed" ? state.page <= 10 : state.page <= state.totalPages);
+
 function hasMore() {
-    if (state.mode === "feed") return state.page <= 10;
-    return state.page <= state.totalPages;
+    return (fromLibrary() && !state.lib.done) || (fromUnsplash() && unsplashMore());
+}
+
+async function fetchLibrary() {
+    const d = await library({
+        q: state.mode === "search" ? state.query : "",
+        creator: state.mode === "user" ? state.user.username : "",
+        page: state.lib.page,
+        per_page: PER_PAGE,
+        order_by: state.mode === "search" ? state.order : "latest",
+        color: state.mode === "search" ? state.color : "",
+        orientation: state.mode === "search" ? state.orientation : "",
+    });
+    const results = Array.isArray(d.results) ? d.results : [];
+    state.lib.total = Number(d.total) || 0;
+    state.lib.page++;
+    if (!d.enabled || results.length < PER_PAGE || (state.lib.page - 1) * PER_PAGE >= state.lib.total) state.lib.done = true;
+    return results;
+}
+
+async function fetchUnsplash() {
+    let results;
+    if (state.mode === "feed") results = await api("/photos", { page: state.page, per_page: PER_PAGE });
+    else if (state.mode === "user") results = await api(`/users/${state.user.username}/photos`, { page: state.page, per_page: PER_PAGE });
+    else {
+        const data = await api("/search/photos", {
+            query: state.query,
+            page: state.page,
+            per_page: PER_PAGE,
+            order_by: state.order,
+            color: state.color,
+            orientation: state.orientation,
+        });
+        results = data.results;
+        state.unsTotal = data.total;
+        state.totalPages = data.total_pages;
+    }
+    results = Array.isArray(results) ? results : [];
+    state.page++;
+    if (state.mode === "feed" && results.length === 0) state.page = 11;
+    // the user endpoint has no total in the body: a short page means we're done
+    if (state.mode === "user" && results.length < PER_PAGE) state.totalPages = state.page - 1;
+    return results;
 }
 
 async function fetchPage() {
-    if (state.mode === "feed") {
-        const data = await api("/photos", { page: state.page, per_page: PER_PAGE });
-        return { results: data, total: null, totalPages: Infinity };
+    let results = [];
+    if (fromLibrary() && !state.lib.done) {
+        try {
+            results = await fetchLibrary();
+        } catch (err) {
+            // mixed in with Unsplash, a library that's down just drops out
+            if (!fromUnsplash() || state.mode === "user") throw err;
+            state.lib.done = true;
+            window.reportProblem?.("library unavailable", err);
+        }
     }
-    if (state.mode === "user") {
-        const data = await api(`/users/${state.user.username}/photos`, { page: state.page, per_page: PER_PAGE });
-        return { results: Array.isArray(data) ? data : [], total: null, totalPages: Infinity };
+    // the library's last page is topped up from Unsplash
+    if (results.length < PER_PAGE && fromUnsplash() && unsplashMore()) {
+        try {
+            results = results.concat(await fetchUnsplash());
+        } catch (err) {
+            if (!results.length) throw err;
+        }
     }
-    const data = await api("/search/photos", {
-        query: state.query,
-        page: state.page,
-        per_page: PER_PAGE,
-        order_by: state.order,
-        color: state.color,
-        orientation: state.orientation,
-    });
-    return { results: data.results, total: data.total, totalPages: data.total_pages };
+    return results;
 }
 
 async function loadPage() {
@@ -284,17 +403,16 @@ async function loadPage() {
     showMore.classList.add("is-busy");
 
     try {
-        const { results, total, totalPages } = await fetchPage();
+        const results = await fetchPage();
         if (token !== state.token) return;
-
-        if (total !== null) {
-            state.total = total;
-            state.totalPages = totalPages;
+        state.total = (fromLibrary() ? state.lib.total : 0) + (fromUnsplash() ? state.unsTotal : 0);
+        // a creator's page opened from a link only knows the username: use their name once seen
+        const who = results[0]?.user;
+        if (state.mode === "user" && state.user.source === "aperture" && who?.name && state.user.name !== who.name) {
+            state.user.name = who.name;
+            titleEl.querySelector("span").innerHTML = `<em>by</em> ${esc(who.name)}`;
+            document.title = `${who.name} — Aperture`;
         }
-        state.page++;
-        if (state.mode === "feed" && results.length === 0) state.page = 11;
-        // the user endpoint has no total in the body: a short page means we're done
-        if (state.mode === "user" && results.length < PER_PAGE) state.totalPages = state.page - 1;
 
         const fresh = results.filter((p) => !state.ids.has(p.id));
         fresh.forEach((p, k) => {
@@ -332,8 +450,37 @@ function updateCounts() {
             ? `${fmt(state.total)} frames found`
             : state.mode === "user"
               ? `Work by ${state.user.name}`
-              : "Curated by Unsplash editors";
+              : fromLibrary() && !fromUnsplash()
+                ? "Made by Aperture creators"
+                : fromLibrary() && state.lib.total
+                  ? "Aperture creators, then Unsplash editors"
+                  : "Curated by Unsplash editors";
 }
+
+/* source switch: All / Aperture / Unsplash */
+const sourceEl = q("#source");
+function syncSource() {
+    if (!sourceEl) return;
+    // until the library answers, show it only to people who picked a source before
+    sourceEl.hidden = state.mode === "user" || !(state.libEnabled === true || (state.libEnabled === null && state.source !== "all"));
+    qa("[data-source]").forEach((b) => {
+        const on = b.dataset.source === state.source;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-checked", on);
+    });
+}
+qa("[data-source]").forEach((b) =>
+    b.addEventListener("click", () => {
+        if (state.source === b.dataset.source) return;
+        state.source = b.dataset.source;
+        try {
+            localStorage.setItem("aperture:source", state.source);
+        } catch (e) {}
+        syncSource();
+        refresh();
+    })
+);
+syncSource();
 
 function updateMore() {
     const more = hasMore() && state.photos.length > 0;
@@ -344,9 +491,16 @@ function updateMore() {
 
 function renderEmpty() {
     gridState.hidden = false;
+    if (fromLibrary() && !fromUnsplash() && state.mode !== "user") {
+        gridState.innerHTML = `
+            <h3>Nothing developed.</h3>
+            <p>${state.mode === "search" ? `No Aperture originals match “${esc(state.query)}” yet.` : "No Aperture originals yet."} Unsplash has plenty in the meantime.</p>
+            <div class="chips"><button class="chip" data-source-all>Show Unsplash too</button></div>`;
+        return;
+    }
     gridState.innerHTML = `
         <h3>Nothing developed.</h3>
-        <p>${state.mode === "user" ? `No public photographs from ${esc(state.user.name)}.` : `No photographs matched “${esc(state.query)}”${state.color || state.orientation ? " with those filters" : ""}. Try something broader.`}</p>
+        <p>${state.mode === "user" ? `No ${state.user.source === "aperture" ? "published" : "public"} photographs from ${esc(state.user.name)}.` : `No photographs matched “${esc(state.query)}”${state.color || state.orientation ? " with those filters" : ""}. Try something broader.`}</p>
         <div class="chips">
             <button class="chip" data-q="Light">Light</button>
             <button class="chip" data-q="Mountains">Mountains</button>
@@ -406,6 +560,8 @@ function resetResults() {
     state.photos = [];
     state.cards = [];
     state.ids = new Set();
+    state.lib = { page: 1, done: false, total: 0 };
+    state.unsTotal = 0;
     state.loading = false;
     state.autoLoads = 0;
     gridState.hidden = true;
@@ -435,6 +591,7 @@ async function runSearch(query, { scroll = true } = {}) {
         const url = new URL(location.href);
         url.searchParams.set("q", query);
         url.searchParams.delete("by");
+        url.searchParams.delete("creator");
         history.replaceState(null, "", url);
     } catch (e) {}
 
@@ -447,12 +604,13 @@ async function runSearch(query, { scroll = true } = {}) {
     await refresh();
 }
 
-// show everything one photographer has published
-async function runUser(username, name, { scroll = true } = {}) {
-    if (!/^[A-Za-z0-9_-]{1,40}$/.test(username || "")) return;
+// show everything one photographer has published (an Aperture creator with source "aperture")
+async function runUser(username, name, { scroll = true, source = "unsplash" } = {}) {
+    const lib = source === "aperture";
+    if (!(lib ? /^[a-z0-9_-]{3,30}$/ : /^[A-Za-z0-9_-]{1,40}$/).test(username || "")) return;
     name = name || username;
     state.mode = "user";
-    state.user = { username, name };
+    state.user = { username, name, source: lib ? "aperture" : "unsplash" };
     state.query = "";
     state.order = "relevant";
     state.color = "";
@@ -463,7 +621,8 @@ async function runUser(username, name, { scroll = true } = {}) {
     qa(".js-search input").forEach((i) => (i.value = ""));
     try {
         const url = new URL(location.href);
-        url.searchParams.set("by", username);
+        url.searchParams.set(lib ? "creator" : "by", username);
+        url.searchParams.delete(lib ? "by" : "creator");
         url.searchParams.delete("q");
         history.replaceState(null, "", url);
     } catch (e) {}
@@ -471,7 +630,7 @@ async function runUser(username, name, { scroll = true } = {}) {
     document.title = `${name} — Aperture`;
     q("#hud-mode").textContent = `@${username.toUpperCase()}`;
     filtersEl.hidden = true;
-    setTitle(`<em>by</em> ${esc(name)}`, "(Photographer)");
+    setTitle(`<em>by</em> ${esc(name)}`, lib ? "(Aperture creator)" : "(Photographer)");
 
     if (scroll) scrollToTarget(resultsEl, { offset: -40 });
     await refresh();
@@ -481,6 +640,7 @@ async function runUser(username, name, { scroll = true } = {}) {
 function syncModeUI() {
     const tones = q("#cv-tones");
     if (tones) tones.hidden = state.mode !== "search";
+    syncSource();
 }
 
 async function refresh() {
@@ -505,6 +665,7 @@ qa(".js-search").forEach((form) =>
 document.addEventListener("click", (e) => {
     const t = e.target.closest("[data-q]");
     if (t) runSearch(t.dataset.q);
+    if (e.target.closest("[data-source-all]")) q('[data-source="all"]')?.click();
 });
 
 /* filters */
@@ -627,34 +788,64 @@ function positionLightboxImage(immediate) {
 
 function fillPanel(p) {
     const user = p.user || {};
+    const lib = isLibrary(p);
+    lightbox.classList.toggle("is-library", lib);
     lightbox.style.setProperty("--c", p.color || "#222");
     q("#lb-index").textContent = `${pad(lb.i + 1)} / ${state.mode === "search" ? fmt(state.total) : pad(state.photos.length)}`;
     q("#lb-title").textContent = photoTitle(p);
-    q("#lb-author").href = utm(user.links?.html || "https://unsplash.com");
-    q("#lb-avatar").src = user.profile_image?.medium || "";
+    // a library creator's page is inside Aperture; an Unsplash profile opens in a new tab
+    ["#lb-author", "#lb-credit-name"].forEach((s) => {
+        const a = q(s);
+        a.href = profileHref(p);
+        if (lib) a.removeAttribute("target");
+        else a.target = "_blank";
+    });
+    const avatar = user.profile_image?.medium || "";
+    q("#lb-avatar").src = avatar;
+    q("#lb-avatar").hidden = !avatar;
+    q("#lb-initial").hidden = !!avatar;
+    q("#lb-initial").textContent = (user.name || "?").trim().charAt(0).toUpperCase();
     q("#lb-name").textContent = user.name || "Unknown";
     q("#lb-credit-name").textContent = user.name || "Unknown";
-    q("#lb-credit-name").href = utm(user.links?.html || "https://unsplash.com");
+    q("#lb-src-unsplash").hidden = lib;
+    q("#lb-src-aperture").hidden = !lib;
     q("#lb-handle").textContent = user.username ? `@${user.username}` : "";
     q("#lb-dim").textContent = `${fmt(p.width)} × ${fmt(p.height)}`;
     q("#lb-color").textContent = (p.color || "—").toUpperCase();
-    q("#lb-likes").textContent = fmt(p.likes || 0);
+    q("#lb-likes").textContent = p.likes == null ? "—" : fmt(p.likes);
+    q("#lb-likes").parentElement.hidden = lib;
     q("#lb-date").textContent = new Date(p.created_at).toLocaleDateString("en-GB", {
         day: "2-digit",
         month: "short",
         year: "numeric",
     });
     q("#lb-loc").textContent = user.location || "—";
-    q("#lb-download").href = `${p.links.download}?force=true&${UTM}`;
-    q("#lb-download").dataset.track = p.links.download_location;
-    q("#lb-open").href = utm(p.links.html);
+    // Unsplash photos are free to use; a library photo's creator chose (free, or view and pin only)
+    const dl = q("#lb-download");
+    const viewOnly = lib && !p.links?.download;
+    dl.hidden = viewOnly;
+    q("#lb-license").hidden = !viewOnly;
+    q("#lb-license-name").textContent = user.name || "the creator";
+    if (lib) {
+        if (!viewOnly) dl.href = `${p.links.download}?download=${encodeURIComponent(`${slugify(photoTitle(p))}-${user.username}.webp`)}`;
+        dl.dataset.track = "";
+    } else {
+        dl.href = `${p.links.download}?force=true&${UTM}`;
+        dl.dataset.track = p.links.download_location;
+    }
+    const open = q("#lb-open");
+    const site = lib ? user.portfolio_url : utm(p.links.html);
+    open.hidden = !site;
+    if (site) open.href = site;
+    q("#lb-open-pre").textContent = lib ? "" : "View on ";
+    q("#lb-open-site").textContent = lib ? "Creator’s site" : "Unsplash";
     const sim = similarQuery(p);
     const simBtn = q("#lb-similar");
     simBtn.disabled = !sim;
     simBtn.title = sim ? `Search “${sim}”` : "No description to search with";
     const byBtn = q("#lb-by");
     q("#lb-by-name").textContent = user.name || "photographer";
-    byBtn.disabled = !user.username || (state.mode === "user" && state.user?.username === user.username);
+    byBtn.disabled = !user.username || (state.mode === "user" && state.user?.username === user.username && (state.user.source === "aperture") === lib);
     q("#lb-prev").hidden = lb.i === 0;
     q("#lb-next").hidden = lb.i >= state.photos.length - 1 && !hasMore();
     window.pins?.syncLightbox(); // pins.js
@@ -847,9 +1038,20 @@ q("#lb-similar").addEventListener("click", () => {
 });
 
 q("#lb-by").addEventListener("click", () => {
-    const u = state.photos[lb.i]?.user;
-    if (u?.username) afterLightbox(() => runUser(u.username, u.name, { scroll: !inCanvas() }));
+    const p = state.photos[lb.i];
+    const u = p?.user;
+    if (u?.username) afterLightbox(() => runUser(u.username, u.name, { scroll: !inCanvas(), source: isLibrary(p) ? "aperture" : "unsplash" }));
 });
+
+// a library creator's name opens their page here, not a new tab
+["#lb-author", "#lb-credit-name"].forEach((s) =>
+    q(s).addEventListener("click", (e) => {
+        const p = state.photos[lb.i];
+        if (!isLibrary(p) || e.metaKey || e.ctrlKey || e.shiftKey) return;
+        e.preventDefault();
+        afterLightbox(() => runUser(p.user.username, p.user.name, { scroll: !inCanvas(), source: "aperture" }));
+    })
+);
 
 q("#lb-close").addEventListener("click", closeLightbox);
 q("#lb-prev").addEventListener("click", () => go(-1));
@@ -987,10 +1189,10 @@ function fillHero(photos) {
         return img.decode ? img.decode().catch(() => {}) : Promise.resolve();
     });
 
-    const names = [...new Map(picks.map((p) => [p.user.username, p.user])).values()];
+    const names = [...new Map(picks.map((p) => [p.user.username, p])).values()];
     const credit = names
         .slice(0, 2)
-        .map((u) => `<a href="${utm(u.links.html)}" target="_blank" rel="noopener">${esc(u.name)}</a>`)
+        .map((p) => `<a href="${esc(profileHref(p))}"${isLibrary(p) ? "" : ' target="_blank" rel="noopener"'}>${esc(p.user.name)}</a>`)
         .join(", ");
     q("#hero-credit").innerHTML = names.length
         ? `Frames by ${credit}${names.length > 2 ? ` &amp; ${names.length - 2} more` : ""}`
@@ -1153,13 +1355,16 @@ async function boot() {
     const params = new URLSearchParams(location.search);
     const initial = (params.get("q") || "").trim();
     const by = (params.get("by") || "").trim();
-    if (!initial && /^[A-Za-z0-9_-]{1,40}$/.test(by)) {
+    const creator = (params.get("creator") || "").trim().toLowerCase();
+    const lib = !initial && /^[a-z0-9_-]{3,30}$/.test(creator);
+    const who = lib ? creator : by;
+    if (lib || (!initial && /^[A-Za-z0-9_-]{1,40}$/.test(by))) {
         state.mode = "user";
-        state.user = { username: by, name: by };
-        document.title = `${by} — Aperture`;
-        q("#hud-mode").textContent = `@${by.toUpperCase()}`;
-        titleEl.querySelector("span").innerHTML = `<em>by</em> @${esc(by)}`;
-        q("#results-kicker").textContent = "(Photographer)";
+        state.user = { username: who, name: who, source: lib ? "aperture" : "unsplash" };
+        document.title = `${who} — Aperture`;
+        q("#hud-mode").textContent = `@${who.toUpperCase()}`;
+        titleEl.querySelector("span").innerHTML = `<em>by</em> @${esc(who)}`;
+        q("#results-kicker").textContent = lib ? "(Aperture creator)" : "(Photographer)";
     }
     if (initial) {
         state.mode = "search";

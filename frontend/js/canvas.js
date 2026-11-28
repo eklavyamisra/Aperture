@@ -216,7 +216,7 @@
         const img = new Image();
         img.crossOrigin = "anonymous";
         img.decoding = "async";
-        img.src = `${p.urls.raw}&w=${SLOT_W}&h=${SLOT_H}&fit=crop&crop=entropy&q=72&auto=format`;
+        img.src = photoSrc(p, { w: SLOT_W, h: SLOT_H, fit: "crop", crop: "entropy", q: 72, auto: "format" });
         img.decode()
             .then(() => {
                 if (myGen !== gen) return;

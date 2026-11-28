@@ -1,6 +1,6 @@
 # Aperture roadmap
 
-Four phases (0–3) plus a track that runs alongside all of them. Status as of 27 November 2026.
+Four phases (0–3) plus a track that runs alongside all of them. Status as of 28 November 2026.
 
 **Legend:** ✅ done · 🟡 partly done · ⏸ waiting on a decision · ⬜ not started
 
@@ -10,7 +10,7 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 | 1 | Make the board useful without Unsplash | ✅ 9 of 9 |
 | 2 | Accounts and the cloud (paid tier starts here) | ✅ 6 of 6 (Supabase; #20 needs the updated schema run) |
 | 3 | Teams and money | 🟡 1 of 6 (#21 built; needs the updated schema run) |
-| Alongside | Growth and quality | 🟡 3 of 5 |
+| Alongside | Growth and quality | 🟡 4 of 7 |
 
 ## Phase 0: Fix before more users arrive
 
@@ -72,6 +72,8 @@ Four phases (0–3) plus a track that runs alongside all of them. Status as of 2
 | 30 | Automated tests in CI | ✅ | `npm test`; GitHub Actions on push and PRs. |
 | 31 | Accessibility audit | 🟡 | Automated axe scan passes (no serious/critical issues). Not yet checked with a real screen reader. |
 | 32 | Layout pass: photo viewer, board toolbar, home search, board backdrop | ✅ | Tied pins no longer show a second pin while a card is lifted; the board keeps its blurred-wall backdrop after a window resize (it used to go see-through to the page below). `tests/threads.spec.js`. Board toolbar no longer scrolls sideways on phones: everyday tools (Add, Undo, Find, Wall) in one row, the rest behind ⋯ (tablets keep Group, Tidy, Palette, Share in the row too); one grouped row with dividers from 1180px up. The viewer's Close bar and actions never scroll out of reach on any screen (only the details scroll); Download full width with Unsplash and Pin side by side; side-by-side panel on phones held sideways; home photos no longer cover the search field. `tests/mobile.spec.js`. |
+
+| 33 | Aperture's own library: creators publish photos (Studio) | ✅ | Built; its tables, bucket and `library_photos()` are applied to the live Supabase project (28 Nov 2026); the site picks it up once this code is deployed. Owner's choices: **approved creators only** (apply in the Studio, approve in the Table Editor; `blocked` hides everything, `photos.hidden` hides one); results **mixed in** with a *From* switch (Everywhere / Aperture creators / Unsplash; Aperture first); the creator picks a **licence per photo** (free to use, or view and pin only). Browser makes 640/1600/3000 px WebP sizes (drops EXIF/GPS). `/studio`, `/?creator=<username>`. `tests/studio.spec.js`. Follow-ups: an in-app review queue for the owner (needs a server key or an admin role), creator stats, reporting a photo, upload from the wall's tray, OG previews for creator pages. |
 
 ## Decisions only the owner can make
 

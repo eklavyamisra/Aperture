@@ -10,6 +10,7 @@ import { GET } from "./backend/api/unsplash.js";
 import { POST as logPOST } from "./backend/api/log.js";
 import { GET as configGET } from "./backend/api/config.js";
 import { GET as boardGET, POST as boardPOST } from "./backend/api/board.js";
+import { GET as libraryGET } from "./backend/api/library.js";
 
 const root = new URL("./frontend/", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
 const PORT = +process.env.PORT || 5173;
@@ -75,6 +76,12 @@ createServer(async (req, res) => {
 
     if (url.pathname === "/api/config") {
         const r = await configGET(new Request(url));
+        res.writeHead(r.status, Object.fromEntries(r.headers));
+        return res.end(await r.text());
+    }
+
+    if (url.pathname === "/api/library") {
+        const r = await libraryGET(new Request(url));
         res.writeHead(r.status, Object.fromEntries(r.headers));
         return res.end(await r.text());
     }

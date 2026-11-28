@@ -65,9 +65,12 @@
             <span class="hud-sep hud-rate-wrap" hidden>/</span>
             <span class="hud-rate-wrap" hidden>API <b id="hud-rate">--</b></span>
         </div>
-        <a class="nav-credit mono magnetic" href="https://unsplash.com/?utm_source=aperture&utm_medium=referral" target="_blank" rel="noopener" data-cursor="Visit">
-            Powered by Unsplash ↗
-        </a>
+        <div class="nav-end">
+            <button type="button" class="nav-credit nav-studio mono" id="nav-studio" aria-controls="studio" data-cursor="Studio" hidden>Studio</button>
+            <a class="nav-credit mono magnetic" href="https://unsplash.com/?utm_source=aperture&utm_medium=referral" target="_blank" rel="noopener" data-cursor="Visit">
+                <span class="nav-long">Powered by </span>Unsplash ↗
+            </a>
+        </div>
     </header>
 
     <main id="top">
@@ -149,6 +152,13 @@
                     </span>
                 </div>
                 <h2 class="results-title" id="results-title"><span>Editorial</span></h2>
+
+                <div class="filter-group source" id="source" role="radiogroup" aria-label="Photos from" hidden>
+                    <span class="mono filter-label">From</span>
+                    <button class="toggle is-active" data-source="all" role="radio" aria-checked="true">Everywhere</button>
+                    <button class="toggle" data-source="aperture" role="radio" aria-checked="false">Aperture creators</button>
+                    <button class="toggle" data-source="unsplash" role="radio" aria-checked="false">Unsplash</button>
+                </div>
 
                 <div class="filters" id="filters" hidden>
                     <div class="filter-group" role="radiogroup" aria-label="Sort order">
@@ -525,9 +535,10 @@
                 <h3 class="lb-title" id="lb-title"></h3>
                 <a class="lb-author" id="lb-author" target="_blank" rel="noopener" data-cursor="Profile">
                     <img id="lb-avatar" alt="">
+                    <i class="avatar-initial" id="lb-initial" aria-hidden="true" hidden></i>
                     <span><b id="lb-name"></b><small class="mono" id="lb-handle"></small></span>
                 </a>
-                <p class="lb-credit">Photo by <a id="lb-credit-name" target="_blank" rel="noopener"></a> on <a href="https://unsplash.com/?utm_source=aperture&utm_medium=referral" target="_blank" rel="noopener">Unsplash</a></p>
+                <p class="lb-credit">Photo by <a id="lb-credit-name" target="_blank" rel="noopener"></a> <span id="lb-src-unsplash">on <a href="https://unsplash.com/?utm_source=aperture&utm_medium=referral" target="_blank" rel="noopener">Unsplash</a></span><span id="lb-src-aperture" hidden>on Aperture</span></p>
                 <dl class="lb-meta mono">
                     <div><dt>Dimensions</dt><dd id="lb-dim"></dd></div>
                     <div><dt>Dominant</dt><dd><i class="lb-swatch" id="lb-swatch"></i><span id="lb-color"></span></dd></div>
@@ -542,12 +553,106 @@
                 </div>
             </div>
             <div class="lb-actions">
+                <p class="lb-license mono" id="lb-license" hidden>View and pin only. Ask <span id="lb-license-name"></span> about other uses.</p>
                 <a class="btn btn--solid" id="lb-download" target="_blank" rel="noopener" data-cursor="Save"><span>Download</span> <span aria-hidden="true">↓</span></a>
-                <a class="btn" id="lb-open" target="_blank" rel="noopener" data-cursor="Open"><span><span class="lb-long">View on </span>Unsplash</span> <span aria-hidden="true">↗</span></a>
+                <a class="btn" id="lb-open" target="_blank" rel="noopener" data-cursor="Open"><span><span class="lb-long" id="lb-open-pre">View on </span><span id="lb-open-site">Unsplash</span></span> <span aria-hidden="true">↗</span></a>
                 <button class="btn lb-pin" id="lb-pin" type="button" aria-pressed="false" data-cursor="Pin"><span>Pin<span class="lb-long"> to board</span></span> <span aria-hidden="true">✦</span></button>
             </div>
             <p class="lb-hint mono">← → to browse · Esc to close</p>
         </aside>
+    </div>
+
+
+    <!-- ============ STUDIO: creators publish their own photos (#33, studio.js) ============ -->
+    <div class="studio" id="studio" role="dialog" aria-modal="true" aria-labelledby="studio-title" data-lenis-prevent hidden>
+        <div class="studio-sheet">
+            <header class="studio-head">
+                <p class="studio-kicker mono">Aperture Studio</p>
+                <button type="button" class="studio-close mono" id="studio-close" data-cursor="Close">Close <span aria-hidden="true">✕</span></button>
+            </header>
+            <h2 class="studio-title" id="studio-title">Your photographs, <em>on Aperture.</em></h2>
+
+            <div data-view="loading">
+                <p class="studio-text" id="studio-loading" role="status">Opening the studio…</p>
+            </div>
+
+            <div data-view="out" hidden>
+                <p class="studio-text">Approved creators publish straight into Aperture’s own library: next to Unsplash in every search, on the wall and on people’s boards. Sign in to apply.</p>
+                <form class="acct-form studio-signin" id="studio-signin">
+                    <label class="sr-only" for="studio-email">Email address</label>
+                    <input type="email" id="studio-email" required autocomplete="email" inputmode="email" placeholder="you@studio.com">
+                    <button type="submit" class="acct-primary mono">Email me a link</button>
+                </form>
+                <p class="acct-or mono"><span>or</span></p>
+                <button type="button" class="acct-google mono" id="studio-google">Continue with Google</button>
+                <p class="acct-fine">By signing in you agree to the <a href="/terms" target="_blank">terms</a> and <a href="/privacy" target="_blank">privacy policy</a>.</p>
+            </div>
+
+            <div data-view="sent" hidden>
+                <p class="studio-text">We sent a sign-in link to <b id="studio-sent-to"></b>. Open it in this browser and you’ll come back here.</p>
+                <button type="button" class="acct-quiet mono" id="studio-back">Use a different email</button>
+            </div>
+
+            <div data-view="pending" hidden>
+                <p class="studio-badge mono" data-status="pending">Application received</p>
+                <p class="studio-text">Thanks, <b class="studio-me-name"></b>. Every new creator is reviewed by hand. Once you’re approved you can upload here, and your page will be at <b class="studio-me-url"></b>.</p>
+                <div class="acct-row"><button type="button" class="acct-quiet mono" data-studio-edit>Edit application</button></div>
+            </div>
+
+            <div data-view="blocked" hidden>
+                <p class="studio-badge mono" data-status="blocked">Not publishing</p>
+                <p class="studio-text">This account can’t publish on Aperture, and its photos are hidden. You can still delete them below. If you think this is a mistake, <a href="https://github.com/eklavyamisra/Aperture/issues" target="_blank" rel="noopener">open an issue</a>.</p>
+            </div>
+
+            <!-- applying and editing the profile share one form -->
+            <form class="studio-form" id="studio-form" data-view="apply" hidden>
+                <p class="studio-text studio-apply-only">Tell people who you are. This becomes your public creator page; your email is never shown.</p>
+                <div class="studio-grid">
+                    <label class="studio-field"><span class="mono">Name</span><input id="studio-name" required maxlength="60" autocomplete="name"></label>
+                    <label class="studio-field"><span class="mono">Username</span><input id="studio-username" required minlength="3" maxlength="30" pattern="[a-z0-9_\-]{3,30}" autocapitalize="off" spellcheck="false" aria-describedby="studio-username-help"><small id="studio-username-help">3–30 lowercase letters, digits, - or _</small></label>
+                    <label class="studio-field studio-wide"><span class="mono">About</span><textarea id="studio-bio" maxlength="300" rows="3" placeholder="What you photograph, and where"></textarea></label>
+                    <label class="studio-field"><span class="mono">Based in</span><input id="studio-location" maxlength="60"></label>
+                    <label class="studio-field"><span class="mono">Website</span><input id="studio-link" type="url" maxlength="200" placeholder="https://" pattern="https://.+"></label>
+                </div>
+                <div class="studio-avatar-row studio-edit-only">
+                    <span class="studio-avatar" id="studio-avatar" aria-hidden="true"></span>
+                    <label class="acct-quiet mono studio-file-btn">Change picture<input type="file" id="studio-avatar-file" accept="image/jpeg,image/png,image/webp" class="sr-only"></label>
+                </div>
+                <label class="studio-check studio-apply-only"><input type="checkbox" id="studio-rights"> <span>I’ll only publish photos I took myself, of people who agreed to be photographed, and I have the rights to share them.</span></label>
+                <div class="acct-row">
+                    <button type="submit" class="acct-primary mono" id="studio-form-submit">Apply to publish</button>
+                    <button type="button" class="acct-quiet mono studio-edit-only" id="studio-form-cancel">Cancel</button>
+                </div>
+            </form>
+
+            <div class="studio-desk" data-view="studio" hidden>
+                <section class="studio-profile">
+                    <span class="studio-avatar" id="studio-me-avatar" aria-hidden="true"></span>
+                    <div class="studio-me">
+                        <b class="studio-me-name"></b>
+                        <a class="mono studio-me-link" id="studio-me-link">View your page →</a>
+                    </div>
+                    <button type="button" class="acct-quiet mono" data-studio-edit>Edit profile</button>
+                </section>
+
+                <label class="studio-drop" id="studio-drop">
+                    <input type="file" id="studio-file" accept="image/jpeg,image/png,image/webp" multiple class="sr-only">
+                    <span class="studio-drop-title">Drop photos here, or <u>choose files</u></span>
+                    <span class="studio-drop-note mono">JPEG, PNG or WebP · at least 1200 px on the long side · location data is removed</span>
+                </label>
+                <p class="studio-progress mono" id="studio-progress" role="status"></p>
+
+                <div class="studio-bar">
+                    <p class="mono" id="studio-count"></p>
+                    <button type="button" class="acct-quiet mono" id="studio-publish-all" hidden>Publish all drafts</button>
+                </div>
+                <ul class="studio-list" id="studio-list"></ul>
+                <p class="studio-text studio-empty" id="studio-empty" hidden>Nothing uploaded yet. New photos start as drafts: give each a title and tags, then publish.</p>
+            </div>
+
+            <p class="acct-error studio-error" id="studio-error" role="alert"></p>
+            <p class="acct-fine studio-fine" id="studio-fine" hidden>Signed in as <b id="studio-who"></b>. <button type="button" class="acct-danger" id="studio-signout">Sign out</button></p>
+        </div>
     </div>
 
     <!-- ============ FOOTER ============ -->
@@ -582,5 +687,6 @@
     <script src="js/comments.js"></script>
     <script src="js/live.js"></script>
     <script src="js/canvas.js"></script>
+    <script src="js/studio.js"></script>
 </body>
 </html>

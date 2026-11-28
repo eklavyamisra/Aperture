@@ -188,6 +188,41 @@
             async deleteComment(id) {
                 must(await sb.rpc("delete_comment", { comment: id }));
             },
+            // #33: the creators' library. Rows are locked to their creator by row-level
+            // security; only approved creators can add photos or files (schema.sql).
+            async creatorMe() {
+                return must(await sb.from("creators").select("username, name, bio, location, link, avatar, status").eq("id", user.id).maybeSingle());
+            },
+            async creatorApply(row) {
+                must(await sb.from("creators").insert({ ...row, id: user.id }));
+            },
+            async creatorUpdate(fields) {
+                must(await sb.from("creators").update(fields).eq("id", user.id));
+            },
+            async myPhotos() {
+                return must(
+                    await sb
+                        .from("photos")
+                        .select("id, title, alt, tags, width, height, color, tone, license, published, hidden, created_at")
+                        .eq("creator", user.id)
+                        .order("created_at", { ascending: false })
+                        .limit(2000)
+                );
+            },
+            async addPhoto(row) {
+                must(await sb.from("photos").insert(row));
+            },
+            async updatePhoto(id, fields) {
+                must(await sb.from("photos").update(fields).eq("id", id));
+            },
+            async deletePhoto(id) {
+                must(await sb.from("photos").delete().eq("id", id));
+                await sb.storage.from("library").remove(["s", "m", "l"].map((k) => `${user.id}/${id}/${k}.webp`));
+            },
+            async putLibraryFile(path, blob, long) {
+                must(await sb.storage.from("library").upload(path, blob, { upsert: true, contentType: blob.type || "image/webp", cacheControl: long ? "31536000" : "3600" }));
+            },
+            libraryBase: () => `${url}/storage/v1/object/public/library/`,
             async wipe() {
                 must(await sb.from("boards").delete().eq("owner", user.id));
                 const files = must(await sb.storage.from("uploads").list(user.id, { limit: 1000 }));
@@ -662,6 +697,61 @@
         },
     };
 
-    window.cloud = { sync, share, comments, live, state: () => state, user: () => user, open, close };
+    /* ---------- the creators' library (#33, studio.js) ---------- */
+    const needUser = () => {
+        if (!user || !backend?.creatorMe) throw new Error("not signed in");
+    };
+    const studio = {
+        available: () => !!backend?.creatorMe,
+        // the public address of a file in the library bucket ("<user id>/<photo id>/s.webp")
+        fileUrl: (path) => backend.libraryBase() + path,
+        me() {
+            needUser();
+            return backend.creatorMe();
+        },
+        apply(row) {
+            needUser();
+            return backend.creatorApply(row);
+        },
+        update(fields) {
+            needUser();
+            return backend.creatorUpdate(fields);
+        },
+        photos() {
+            needUser();
+            return backend.myPhotos();
+        },
+        add(row) {
+            needUser();
+            return backend.addPhoto(row);
+        },
+        edit(id, fields) {
+            needUser();
+            return backend.updatePhoto(id, fields);
+        },
+        remove(id) {
+            needUser();
+            return backend.deletePhoto(id);
+        },
+        // long: the file never changes (photo sizes); short: it may be replaced (the avatar)
+        put(path, blob, long = true) {
+            needUser();
+            return backend.putLibraryFile(path, blob, long);
+        },
+    };
+
+    // sign-in from outside the board's account dialog (the studio's own form)
+    const signIn = {
+        email: (email) => backend.signInEmail(email),
+        google: () => backend.signInGoogle(),
+        out: async () => {
+            signingOut = true;
+            await backend.signOut().catch(() => {});
+            signingOut = false;
+            signedOut(true);
+        },
+    };
+
+    window.cloud = { sync, share, comments, live, studio, signIn, state: () => state, user: () => user, open, close };
     start();
 })();

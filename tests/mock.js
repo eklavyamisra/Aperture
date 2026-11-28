@@ -2,6 +2,7 @@
 // the rate limit and always see the same photos.
 //
 //   /api/unsplash?path=…          answered from generated photo records
+//   /api/library?…                an empty library (studio.spec.js serves its own)
 //   https://images.unsplash.com/… answered with small generated PNGs
 //
 // Every call to the download endpoint is recorded in `calls.downloads`.
@@ -117,6 +118,8 @@ export async function mockUnsplash(target) {
         if (body === null) return route.fulfill({ status: 400, json: { error: "unsupported path" } });
         return route.fulfill({ status: 200, json: body, headers: { "cache-control": "no-store" } });
     });
+    // no library in tests unless studio.spec.js serves one (never the real Supabase in .env.local)
+    await target.route("**/api/library?**", (route) => route.fulfill({ status: 200, json: { enabled: false, total: 0, results: [] } }));
     // accounts aren't configured in tests unless cloud.spec.js installs its fake backend
     await target.route("**/api/config", (route) => route.fulfill({ status: 200, json: {} }));
     await target.route("https://images.unsplash.com/**", (route) =>

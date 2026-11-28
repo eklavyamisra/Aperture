@@ -1,7 +1,8 @@
 # Aperture architecture
 
 Aperture is split into a **frontend** (`frontend/`, a static site with no build step or framework) and a
-**backend** (`backend/`: four small serverless functions plus a Supabase database for accounts),
+**backend** (`backend/`: five small serverless functions plus a Supabase database for accounts and
+Aperture's own photo library),
 hosted on Vercel. Boards are offline-first: the browser copy is the one being edited, and when someone
 signs in it is mirrored to Supabase so their devices stay in step. Without an account, or when
 Supabase isn't configured, everything stays on the device.
@@ -20,6 +21,7 @@ flowchart LR
         SHARE[share.js<br/>share panel]
         COMM[comments.js<br/>comments panel]
         LIVE[live.js<br/>editing together]
+        STUDIO[studio.js<br/>creators publish]
         LS[(localStorage<br/>boards, views)]
         IDB[(IndexedDB<br/>uploaded images)]
     end
@@ -29,12 +31,14 @@ flowchart LR
         LOG[backend/api/log.js]
         CFG[backend/api/config.js]
         BOARD[backend/api/board.js<br/>/b/code pages]
+        LIBAPI[backend/api/library.js<br/>creators' photos]
         LOGS[(Function logs)]
     end
     subgraph Supabase
         AUTH[Auth<br/>email link, Google]
         DB[(Postgres<br/>boards, shares, comments, editors)]
         BUCKET[(Storage<br/>uploads bucket)]
+        LIBB[(Storage<br/>public library bucket)]
         RT[Realtime<br/>private board:room channels]
     end
     UNS[api.unsplash.com]
@@ -61,6 +65,11 @@ flowchart LR
     LIVE <-->|pins:edit / pins.live.apply| PINS
     LIVE -->|join, save, channel| CLOUD
     CLOUD <-->|owner + editors only| RT
+    API -->|/api/library?q=…| LIBAPI -->|library_photos| DB
+    API --> LIBB
+    STUDIO --> CLOUD
+    CLOUD -->|creators, photos| DB
+    CLOUD -->|own folder, approved only| LIBB
 ```
 
 ## Repository layout
@@ -82,6 +91,7 @@ frontend/            the site, served as-is (Vercel's output directory)
     share.js         Share panel: short links, passwords, new link, stop sharing; visitors' password prompt
     comments.js      comments panel on shared boards and on your own board; card badges (window.comments)
     live.js          editing a shared board together: changes, people, cursors, drag previews (window.live)
+    studio.js        the Studio: creators apply, upload, title, tag, license and publish photos (window.studio)
   img/               og.jpg (link preview), favicon.svg
   pages/             privacy.html, terms.html (served at /privacy and /terms)
 backend/
@@ -89,6 +99,7 @@ backend/
     unsplash.js      GET proxy: holds the key, allow-lists endpoints and params, sets CDN cache headers
     log.js           POST endpoint: allow-lists and trims error reports, writes them to the logs
     config.js        GET: the public Supabase URL and anon key, or {} when accounts aren't set up
+    library.js       GET: published photos from Aperture's own library, shaped like Unsplash photos (#33)
     board.js         GET /b/<code>: index.html with the board's link-preview tags and the board embedded;
                      POST: a password-protected board, given the right password
   supabase/
@@ -108,11 +119,12 @@ index.html (root)    redirect from the old GitHub Pages URL
 
 Classic `<script>` files, each wrapped in an IIFE, loaded in this order:
 GSAP + ScrollTrigger + Flip + Lenis (CDN) → `js/api.js` → `js/media.js` → `js/pins.js` → `js/tour.js` →
-`js/cloud.js` → `js/share.js` → `js/comments.js` → `js/live.js` → `js/canvas.js` (`js/errors.js` loads first, in `<head>`).
+`js/cloud.js` → `js/share.js` → `js/comments.js` → `js/live.js` → `js/canvas.js` → `js/studio.js` (`js/errors.js` loads first, in `<head>`).
 
 - **`api.js`** defines the shared globals the others rely on: `state` (current mode, query, filters,
   `photos`, paging token), `q`/`qa`, `api(path, params)`, `openLightbox`, `lb`, `lightbox`, `gsap`,
-  `reduceMotion`, the custom cursor. Modes: `feed`, `search`, `user` (one photographer).
+  `reduceMotion`, the custom cursor, `photoSrc()` / `isLibrary()` (image addresses for either source).
+  Modes: `feed`, `search`, `user` (one photographer, or one Aperture creator).
 - **`canvas.js`** draws the wall in one full-screen shader. Photos go into a texture atlas, and the
   shader works out each pixel's tile, so the wall is infinite in one draw call. Resolution adapts when
   frames run slow. It pauses and is CSS-blurred once while the board is open.
@@ -255,6 +267,41 @@ the owner (column access on `shares`) and editors ever see. Signed out, the shar
 - Editors can't add images from their device (the image would only exist on that device). They can add
   photos, notes and links.
 
+## Aperture's own library (#33)
+
+Creators publish photos into Aperture itself, so results don't depend only on Unsplash.
+
+- **Who:** anyone signed in applies in the Studio (`studio.js`, `/studio` → `/?studio=1`) with a public profile
+  (`creators`: name, username, bio, location, website, picture). New creators are `pending`; the site's owner sets
+  `approved` or `blocked` in the Table Editor. Column grants keep `status` (and a photo's `hidden`) out of
+  creators' reach. Only approved creators can add photo rows or write files; blocked creators can still delete theirs.
+- **Files:** the browser decodes each upload (EXIF orientation applied), refuses anything under 1,200 px on the
+  long side, and writes three WebP sizes (s / m / l = 640 / 1600 / 3000 px long side, capped at the original),
+  which also drops camera and location metadata. It measures the average colour and a tone that uses
+  Unsplash's colour names, so the Tone filter works across both. Files go to the public `library` bucket as
+  `<creator id>/<photo id>/<size>.webp` (photo ids are `ap-` + 12 random characters). The picture is
+  `<creator id>/avatar.webp`, versioned by `creators.avatar` (`?v=`).
+- **Photos:** a row per photo (`photos`: title, description, up to 12 tags, size, colour, tone, licence
+  `free` or `view`, `published`, `hidden`). New uploads are drafts. Up to 2,000 photos per creator, 60 new an hour.
+- **Reading:** `GET /api/library` (`backend/api/library.js`) allow-lists the query and calls
+  `library_photos()`, a security-definer function that returns only published, unhidden photos by approved
+  creators, full-text searched (`english` stemming over title, tags and description), filtered by tone and shape,
+  newest or best match first. Each row becomes an Unsplash-shaped record with `source: "aperture"`, `urls.raw`
+  set to the photo's folder and `user.links.html` = `/?creator=<username>`. Cached 60 s at the edge.
+  `{ enabled: false }` when accounts aren't set up.
+- **Mixing (`api.js`):** the *From* switch (Everywhere / Aperture creators / Unsplash, kept in
+  `aperture:source`) is shown once the library answers. *Everywhere* pages through the library's matches
+  first, and its last page is topped up from Unsplash. If the library fails it drops out quietly. A creator's
+  page (`?creator=`) is library only. `photoSrc(p, { w, h, … })` picks the smallest stored size that covers the
+  box for library photos, and adds imgix params for Unsplash ones. The grid, wall, viewer, tray, board cards,
+  palette and PNG export all go through it.
+- **Viewer:** library photos credit "on Aperture", link the creator's name to their page in the app, show
+  *Creator's site* if they gave one, and either download `l.webp` (`?download=` name) or say "View and pin only".
+  No Unsplash download is reported for them, and the PNG export only credits Unsplash when it has Unsplash photos.
+- **Boards:** a pinned library photo is a normal `unsplash`-kind item whose `urls.raw` matches `LIB_RAW`
+  (`cleanItem` accepts either host). `#board=` links carry its full address. Deleting the photo
+  leaves boards with a missing image.
+
 ## Accounts and sync
 
 Supabase holds these, all locked to their owner by row-level security
@@ -306,6 +353,9 @@ All backend code is in `backend/api/`. The files in the root `api/` folder only 
 - **`config.js`**: returns `{ supabase: { url, anonKey } }` only when both env vars are set and the URL
   is a Supabase project URL; otherwise `{}`, which keeps accounts switched off. The anon key is public by
   design; the service-role key is never used by the app.
+- **`library.js`**: `GET /api/library?q=&page=&per_page=&order_by=&color=&orientation=&creator=`. Values are
+  allow-listed (page ≤ 50, per_page ≤ 30, tone and shape from fixed lists, username pattern) and sent to
+  `library_photos()` with the anon key; rows that don't look right (ids, uuid, username) are dropped.
 - **Env** (Vercel env vars; `.env.local` for `dev.mjs`, gitignored): `UNSPLASH_ACCESS_KEY`, `SUPABASE_URL`,
   `SUPABASE_ANON_KEY`.
 
@@ -332,6 +382,11 @@ All backend code is in `backend/api/`. The files in the root `api/` folder only 
   uploads, password-protected edit links, and editing ending when the owner turns it off or makes a new link.
 - `TEST_PORT=4273 npm run test:e2e` runs the browser tests on another port, for a second checkout (a git
   worktree) while another test server is running.
+- `tests/studio.spec.js`: the library and Studio (#33) against a stand-in for Supabase's creators, photos
+  and public bucket, with `/api/library` served by the real `library.js`. It covers mixing and the source switch,
+  search and tone, the viewer (credit, licence, creator page), pinning, applying, approval, uploading (sizes,
+  too-small files), editing, publishing, deleting, and the phone layout. `tests/mock.js` answers
+  `/api/library` with an empty library everywhere else, so no test ever reaches the real database.
 - `tests/supabase-lock.spec.js`: the real Supabase wrapper in `cloud.js` against a stand-in library that,
   like supabase-js, runs auth callbacks inside its lock. Guards against the start-up deadlock (sync stuck
   on "Syncing…"): `cloud.js` reacts to auth changes only after the callback returns.

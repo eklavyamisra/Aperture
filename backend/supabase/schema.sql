@@ -1,4 +1,5 @@
--- Aperture: accounts, synced boards, uploaded images (roadmap #15–17), share links (#18–19), comments (#20) and live editing (#21).
+-- Aperture: accounts, synced boards, uploaded images (roadmap #15–17), share links (#18–19), comments (#20), live editing (#21)
+-- and the creators' library (#33).
 -- Run once in the Supabase dashboard: SQL Editor → New query → paste → Run.
 -- Safe to re-run.
 
@@ -37,7 +38,7 @@ create policy "boards: owner inserts" on public.boards for insert with check (ow
 create policy "boards: owner updates" on public.boards for update using (owner = auth.uid()) with check (owner = auth.uid());
 create policy "boards: owner deletes" on public.boards for delete using (owner = auth.uid());
 
-create or replace function public.boards_touch() returns trigger language plpgsql as $$
+create or replace function public.boards_touch() returns trigger language plpgsql set search_path = public as $$
 begin
     new.synced_at := now();
     return new;
@@ -563,3 +564,172 @@ create policy "live: editors send" on realtime.messages for insert to authentica
     with check (realtime.messages.extension in ('broadcast', 'presence')
                 and realtime.topic() like 'board:%'
                 and public.can_use_room(substring(realtime.topic() from 7)));
+
+
+-- ---------- the Aperture library: creators and their photos (#33) ----------
+-- Anyone signed in can apply to be a creator (status 'pending'). The site's
+-- owner approves them by setting status = 'approved' in the Table Editor (or
+-- 'blocked' to take someone down). Only approved creators can upload files or
+-- add photos. A photo is a draft until its creator publishes it; the owner can
+-- hide any photo with hidden = true. Visitors only ever see published, unhidden
+-- photos by approved creators, through library_photos() below.
+--
+-- Files live in the public "library" bucket as "<creator id>/<photo id>/<size>.webp"
+-- (s: 640 px, m: 1600 px, l: 3000 px on the long side, never larger than the
+-- original). The browser makes the sizes, which also drops location data.
+create table if not exists public.creators (
+    id         uuid primary key default auth.uid() references auth.users (id) on delete cascade,
+    username   text not null unique check (username ~ '^[a-z0-9_-]{3,30}$'),
+    name       text not null check (char_length(btrim(name)) between 1 and 60),
+    bio        text not null default '' check (char_length(bio) <= 300),
+    location   text not null default '' check (char_length(location) <= 60),
+    link       text not null default '' check (link = '' or (link ~ '^https://[^[:space:]]+$' and char_length(link) <= 200)),
+    avatar     integer not null default 0 check (avatar >= 0), -- version of avatar.webp; 0: none
+    status     text not null default 'pending' check (status in ('pending', 'approved', 'blocked')),
+    created_at timestamptz not null default now()
+);
+
+alter table public.creators enable row level security;
+-- column by column: a creator can't approve themselves
+revoke all on public.creators from anon, authenticated;
+grant select on public.creators to authenticated;
+grant insert (id, username, name, bio, location, link) on public.creators to authenticated;
+grant update (username, name, bio, location, link, avatar) on public.creators to authenticated;
+
+drop policy if exists "creators: self reads"   on public.creators;
+drop policy if exists "creators: self applies" on public.creators;
+drop policy if exists "creators: self updates" on public.creators;
+
+create policy "creators: self reads"   on public.creators for select using (id = auth.uid());
+create policy "creators: self applies" on public.creators for insert with check (id = auth.uid());
+create policy "creators: self updates" on public.creators for update using (id = auth.uid() and status <> 'blocked') with check (id = auth.uid());
+
+-- Internal: is the caller an approved creator?
+create or replace function public.is_approved_creator()
+returns boolean language sql stable security definer set search_path = public as $$
+    select exists (select 1 from public.creators c where c.id = auth.uid() and c.status = 'approved')
+$$;
+
+revoke all on function public.is_approved_creator() from public, anon;
+grant execute on function public.is_approved_creator() to authenticated;
+
+-- Internal: the words a photo is found by (immutable, so it can feed a generated column)
+create or replace function public.photo_words(title text, alt text, tags text[])
+returns tsvector language sql immutable set search_path = public as $$
+    select setweight(to_tsvector('english'::regconfig, coalesce(title, '')), 'A')
+        || setweight(to_tsvector('english'::regconfig, coalesce(array_to_string(tags, ' '), '')), 'A')
+        || setweight(to_tsvector('english'::regconfig, coalesce(alt, '')), 'B')
+$$;
+
+create table if not exists public.photos (
+    id         text primary key check (id ~ '^ap-[a-z0-9]{12}$'),
+    creator    uuid not null default auth.uid() references public.creators (id) on delete cascade,
+    title      text not null check (char_length(btrim(title)) between 1 and 120),
+    alt        text not null default '' check (char_length(alt) <= 300),
+    tags       text[] not null default '{}' check (cardinality(tags) <= 12 and char_length(array_to_string(tags, ',')) <= 400),
+    width      integer not null check (width between 100 and 20000),
+    height     integer not null check (height between 100 and 20000),
+    color      text not null check (color ~ '^#[0-9a-f]{6}$'),
+    tone       text not null check (tone in ('black_and_white', 'black', 'white', 'yellow', 'orange', 'red', 'purple', 'magenta', 'green', 'teal', 'blue')),
+    license    text not null default 'free' check (license in ('free', 'view')),
+    published  boolean not null default false,
+    hidden     boolean not null default false, -- set by the site's owner
+    created_at timestamptz not null default now(),
+    words      tsvector generated always as (public.photo_words(title, alt, tags)) stored
+);
+create index if not exists photos_words on public.photos using gin (words);
+create index if not exists photos_creator on public.photos (creator, created_at desc);
+create index if not exists photos_public on public.photos (created_at desc) where published and not hidden;
+
+alter table public.photos enable row level security;
+revoke all on public.photos from anon, authenticated;
+grant select (id, creator, title, alt, tags, width, height, color, tone, license, published, hidden, created_at) on public.photos to authenticated;
+grant insert (id, title, alt, tags, width, height, color, tone, license, published) on public.photos to authenticated;
+grant update (title, alt, tags, license, published) on public.photos to authenticated;
+grant delete on public.photos to authenticated;
+
+drop policy if exists "photos: creator reads"   on public.photos;
+drop policy if exists "photos: creator adds"    on public.photos;
+drop policy if exists "photos: creator edits"   on public.photos;
+drop policy if exists "photos: creator deletes" on public.photos;
+
+create policy "photos: creator reads"   on public.photos for select using (creator = auth.uid());
+create policy "photos: creator adds"    on public.photos for insert with check (creator = auth.uid() and public.is_approved_creator());
+create policy "photos: creator edits"   on public.photos for update using (creator = auth.uid()) with check (creator = auth.uid() and public.is_approved_creator());
+create policy "photos: creator deletes" on public.photos for delete using (creator = auth.uid());
+
+-- at most 2,000 photos per creator, and 60 new ones an hour
+create or replace function public.photos_limit() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+    if (select count(*) from public.photos p where p.creator = new.creator) >= 2000 then
+        raise exception 'photo limit reached (2,000)';
+    end if;
+    if (select count(*) from public.photos p where p.creator = new.creator and p.created_at > now() - interval '1 hour') >= 60 then
+        raise exception 'too many uploads, wait a while';
+    end if;
+    return new;
+end $$;
+
+revoke all on function public.photos_limit() from public, anon, authenticated;
+
+drop trigger if exists photos_limit on public.photos;
+create trigger photos_limit before insert on public.photos
+    for each row execute function public.photos_limit();
+
+-- Public bucket: anyone can load a file by its address, but only an approved
+-- creator writes, and only inside their own folder.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('library', 'library', true, 10485760, array['image/webp', 'image/jpeg'])
+on conflict (id) do update
+    set public = true, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "library: creator reads"   on storage.objects;
+drop policy if exists "library: creator writes"  on storage.objects;
+drop policy if exists "library: creator updates" on storage.objects;
+drop policy if exists "library: creator deletes" on storage.objects;
+
+create policy "library: creator reads" on storage.objects for select
+    using (bucket_id = 'library' and (storage.foldername(name))[1] = auth.uid()::text);
+create policy "library: creator writes" on storage.objects for insert
+    with check (bucket_id = 'library' and (storage.foldername(name))[1] = auth.uid()::text and public.is_approved_creator());
+create policy "library: creator updates" on storage.objects for update
+    using (bucket_id = 'library' and (storage.foldername(name))[1] = auth.uid()::text and public.is_approved_creator());
+create policy "library: creator deletes" on storage.objects for delete
+    using (bucket_id = 'library' and (storage.foldername(name))[1] = auth.uid()::text);
+
+-- The one public read of the library: published photos by approved creators,
+-- best match first (or newest first), with the creator's public profile.
+-- total is the number of matches across all pages.
+create or replace function public.library_photos(
+    q_text text default null, q_creator text default null, q_tone text default null, q_shape text default null,
+    q_sort text default 'relevant', q_page integer default 1, q_per integer default 24)
+returns table (id text, creator uuid, title text, alt text, tags text[], width integer, height integer, color text,
+               license text, created_at timestamptz, username text, name text, bio text, location text, link text,
+               avatar integer, total bigint)
+language sql stable security definer set search_path = public as $$
+    with args as (
+        select case when nullif(btrim(coalesce(q_text, '')), '') is null then null
+                    else websearch_to_tsquery('english'::regconfig, left(q_text, 200)) end as ts,
+               least(greatest(coalesce(q_per, 24), 1), 30) as per,
+               least(greatest(coalesce(q_page, 1), 1), 50) as page
+    )
+    select p.id, p.creator, p.title, p.alt, p.tags, p.width, p.height, p.color, p.license, p.created_at,
+           c.username, c.name, c.bio, c.location, c.link, c.avatar, count(*) over ()
+      from public.photos p
+      join public.creators c on c.id = p.creator
+     cross join args a
+     where p.published and not p.hidden and c.status = 'approved'
+       and (a.ts is null or p.words @@ a.ts)
+       and (q_creator is null or c.username = q_creator)
+       and (q_tone is null or p.tone = q_tone)
+       and (q_shape is null
+            or (q_shape = 'landscape' and p.width > p.height * 1.1)
+            or (q_shape = 'portrait' and p.height > p.width * 1.1)
+            or (q_shape = 'squarish' and p.width <= p.height * 1.1 and p.height <= p.width * 1.1))
+     order by case when a.ts is null or q_sort = 'latest' then 0 else ts_rank(p.words, a.ts) end desc, p.created_at desc, p.id
+     limit (select per from args) offset ((select page from args) - 1) * (select per from args)
+$$;
+
+revoke all on function public.library_photos(text, text, text, text, text, integer, integer) from public;
+grant execute on function public.library_photos(text, text, text, text, text, integer, integer) to anon, authenticated;

@@ -5,6 +5,7 @@ import { GET } from "../backend/api/unsplash.js";
 import { POST } from "../backend/api/log.js";
 import { GET as config } from "../backend/api/config.js";
 import { GET as boardPage, respond as boardRespond, unlock as boardUnlock } from "../backend/api/board.js";
+import { respond as libraryRespond, args as libraryArgs, shape as libraryShape } from "../backend/api/library.js";
 
 /* ---------- api/unsplash.js ---------- */
 
@@ -322,5 +323,82 @@ test("board unlock: sends the password to shared_board() in the body", async () 
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
         }
+    }
+});
+
+/* ---------- api/library.js (#33) ---------- */
+
+const BASE = "https://abcdefghijklmnopqrst.supabase.co";
+const CREATOR = "11111111-1111-1111-1111-111111111111";
+const libRow = (over = {}) => ({
+    id: "ap-abcdefghijk1",
+    creator: CREATOR,
+    title: "Fog over the harbour",
+    alt: "boats in fog",
+    tags: ["harbour", "fog"],
+    width: 4000,
+    height: 3000,
+    color: "#8899aa",
+    license: "free",
+    created_at: "2026-11-01T00:00:00Z",
+    username: "ada",
+    name: "Ada Ruiz",
+    bio: "Coasts.",
+    location: "Lisbon",
+    link: "https://ada.example",
+    avatar: 2,
+    total: 7,
+    ...over,
+});
+
+test("library: query string is allow-listed into library_photos() arguments", () => {
+    const a = libraryArgs(new URL("http://x/api/library?q=%20fog%20&page=99&per_page=500&order_by=latest&color=blue&orientation=portrait&creator=Ada&evil=1"));
+    assert.deepEqual(a, { q_page: 50, q_per: 30, q_sort: "latest", q_text: "fog", q_creator: "ada", q_tone: "blue", q_shape: "portrait" });
+    const b = libraryArgs(new URL("http://x/api/library?color=hotpink&orientation=round&creator=a%27%3B--&order_by=drop"));
+    assert.deepEqual(b, { q_page: 1, q_per: 24, q_sort: "relevant" });
+});
+
+test("library: rows become Unsplash-shaped photos", () => {
+    const p = libraryShape(libRow(), BASE);
+    assert.equal(p.source, "aperture");
+    assert.equal(p.urls.raw, `${BASE}/storage/v1/object/public/library/${CREATOR}/ap-abcdefghijk1/`);
+    assert.equal(p.links.download, `${p.urls.raw}l.webp`);
+    assert.equal(p.user.links.html, "/?creator=ada");
+    assert.equal(p.user.profile_image.small, `${BASE}/storage/v1/object/public/library/${CREATOR}/avatar.webp?v=2`);
+    assert.deepEqual(p.tags, [{ title: "harbour" }, { title: "fog" }]);
+    assert.equal(p.description, "Fog over the harbour");
+    // view-only photos have no download; bad links and bad rows are dropped
+    const v = libraryShape(libRow({ license: "view", link: "javascript:alert(1)", avatar: 0 }), BASE);
+    assert.equal(v.links.download, null);
+    assert.equal(v.user.portfolio_url, null);
+    assert.equal(v.user.profile_image, null);
+    assert.equal(libraryShape(libRow({ id: "../../etc" }), BASE), null);
+    assert.equal(libraryShape(libRow({ creator: "x/../y" }), BASE), null);
+});
+
+test("library: answers, caches, and stays quiet when accounts are off", async () => {
+    let seen = null;
+    const res = await libraryRespond(new Request("http://x/api/library?q=fog"), async (a) => ((seen = a), { rows: [libRow(), libRow({ id: "bad" })], base: BASE }));
+    assert.equal(res.status, 200);
+    assert.equal(seen.q_text, "fog");
+    const body = await res.json();
+    assert.equal(body.enabled, true);
+    assert.equal(body.total, 7);
+    assert.equal(body.results.length, 1);
+    assert.match(res.headers.get("cdn-cache-control"), /s-maxage=60/);
+
+    const off = await libraryRespond(new Request("http://x/api/library"), async () => null);
+    assert.deepEqual(await off.json(), { enabled: false, total: 0, results: [] });
+
+    const realErr = console.error;
+    console.error = () => {};
+    try {
+        const broken = await libraryRespond(new Request("http://x/api/library"), async () => {
+            throw new Error("down");
+        });
+        assert.equal(broken.status, 502);
+        assert.equal(broken.headers.get("cache-control"), "no-store");
+    } finally {
+        console.error = realErr;
     }
 });

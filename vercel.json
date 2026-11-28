@@ -11,6 +11,7 @@
         "api/board.js": { "includeFiles": "frontend/index.html" }
     },
     "redirects": [
+        { "source": "/studio", "destination": "/?studio=1", "permanent": false },
         { "source": "/og.jpg", "destination": "/img/og.jpg", "permanent": true },
         { "source": "/favicon.svg", "destination": "/img/favicon.svg", "permanent": true }
     ],

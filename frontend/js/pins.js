@@ -10,6 +10,7 @@
 ========================================================== */
 (() => {
     const IMG_HOST = /^https:\/\/images\.unsplash\.com\//;
+    // or a photo from Aperture's own library (#33): LIB_RAW and photoSrc() are in api.js
     const HOST = "https://images.unsplash.com/";
     const INDEX = "aperture:boards";
     const bkey = (id) => `aperture:board:${id}`;
@@ -122,6 +123,9 @@
 
     /* ---------- sanitising (storage, imports and share links all pass through here) ---------- */
     const okLink = (u, fb) => (typeof u === "string" && /^https:\/\/unsplash\.com\//.test(u) ? u : fb);
+    // where a pinned photo's credit and "open" links go (an Aperture creator's page for library photos)
+    const profileOf = (p) => (isLibrary(p) ? `/?creator=${p.user.username}` : utmLink(p.user.links.html));
+    const photoPage = (p) => (isLibrary(p) ? `/?creator=${p.user.username}` : utmLink(p.links.html));
     const hexOr = (c, fb = "#2a2723") => (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c || "") ? c : fb);
     const posInt = (n) => (Number.isFinite(+n) && +n > 0 ? Math.min(20000, Math.round(+n)) : 0);
     function safeUrl(u, httpsOnly) {
@@ -135,10 +139,11 @@
             return null;
         }
     }
-    const validPhoto = (p) => !!p && typeof p.id === "string" && PHOTO_ID.test(p.id) && typeof p.urls?.raw === "string" && IMG_HOST.test(p.urls.raw);
+    const validPhoto = (p) => !!p && typeof p.id === "string" && PHOTO_ID.test(p.id) && typeof p.urls?.raw === "string" && (IMG_HOST.test(p.urls.raw) || LIB_RAW.test(p.urls.raw));
 
     function snap(p) {
-        const username = PHOTO_ID.test(p.user?.username || "") ? p.user.username : "";
+        const lib = LIB_RAW.test(p.urls.raw);
+        const username = (lib ? /^[a-z0-9_-]{3,30}$/ : PHOTO_ID).test(p.user?.username || "") ? p.user.username : "";
         return {
             id: p.id,
             color: hexOr(p.color, "#222222"),
@@ -147,11 +152,11 @@
             alt_description: str(p.alt_description, 300),
             description: str(p.description, 300),
             urls: { raw: str(p.urls.raw, 600) },
-            links: { html: okLink(p.links?.html, `https://unsplash.com/photos/${p.id}`) },
+            links: { html: lib ? `/?creator=${username}` : okLink(p.links?.html, `https://unsplash.com/photos/${p.id}`) },
             user: {
                 name: str(p.user?.name || "Unknown", 80),
                 username,
-                links: { html: okLink(p.user?.links?.html, username ? `https://unsplash.com/@${username}` : "https://unsplash.com") },
+                links: { html: lib ? `/?creator=${username}` : okLink(p.user?.links?.html, username ? `https://unsplash.com/@${username}` : "https://unsplash.com") },
             },
         };
     }
@@ -494,7 +499,7 @@
         const to = countEl.getBoundingClientRect();
         const el = document.createElement("div");
         el.className = "pb-fly";
-        el.style.backgroundImage = `url("${encodeURI(p.urls.raw)}&w=240&q=60&auto=format")`;
+        el.style.backgroundImage = `url("${encodeURI(photoSrc(p, { w: 240, q: 60, auto: "format" }))}")`;
         el.style.backgroundColor = p.color || "#222";
         document.body.appendChild(el);
         gsap.set(el, { x: from.left, y: from.top, width: from.width, height: from.height });
@@ -551,8 +556,8 @@
         const b = id === index.active && !away() ? B : store.get(bkey(id));
         const pins = Array.isArray(b?.pins) ? b.pins : [];
         const thumbs = pins
-            .map((x) => x?.photo?.urls?.raw)
-            .filter((u) => typeof u === "string" && IMG_HOST.test(u))
+            .map((x) => x?.photo)
+            .filter((p) => typeof p?.urls?.raw === "string" && (IMG_HOST.test(p.urls.raw) || LIB_RAW.test(p.urls.raw)))
             .slice(0, 3);
         return { n: pins.length, thumbs };
     }
@@ -574,10 +579,10 @@
             stack.className = "pb-opt-stack";
             stack.setAttribute("aria-hidden", "true");
             if (thumbs.length) {
-                thumbs.forEach((u) => {
+                thumbs.forEach((p) => {
                     const img = document.createElement("img");
                     img.alt = "";
-                    img.src = `${u}&w=80&h=100&fit=crop&q=60&auto=format`;
+                    img.src = photoSrc(p, { w: 80, h: 100, fit: "crop", q: 60, auto: "format" });
                     stack.appendChild(img);
                 });
             } else stack.appendChild(document.createElement("i"));
@@ -1249,7 +1254,7 @@
         nameInput.readOnly = readonly;
     }
 
-    const cardSrc = (p) => `${p.urls.raw}&w=420&h=525&fit=crop&crop=entropy&q=70&auto=format`;
+    const cardSrc = (p) => photoSrc(p, { w: 420, h: 525, fit: "crop", crop: "entropy", q: 70, auto: "format" });
     const utmLink = (u) => `${u}?utm_source=aperture&utm_medium=referral`;
 
     function mk(tag, cls, text) {
@@ -1310,6 +1315,8 @@
                 if (x.kind === "unsplash") {
                     img.alt = x.photo.alt_description || x.photo.description || "Pinned photo";
                     img.src = cardSrc(x.photo);
+                    // a library photo its creator deleted
+                    img.onerror = () => card.classList.add("is-missing");
                 } else if (x.kind === "upload") {
                     img.alt = x.media.name || "Your image";
                     window.media?.url(id).then((u) => {
@@ -1354,14 +1361,14 @@
         // credit / source line
         if (x.kind !== "note") {
             const meta = mk("div", "pb-meta mono");
-            if (x.kind === "unsplash") meta.append(extLink(utmLink(x.photo.user.links.html), x.photo.user.name, "Profile"), mk("span", "", fromLabel(x)));
+            if (x.kind === "unsplash") meta.append(extLink(profileOf(x.photo), x.photo.user.name, "Profile"), mk("span", "", fromLabel(x)));
             else if (x.kind === "upload") meta.append(mk("span", "", x.media.name || "Your image"), mk("span", "", "Upload"));
             else meta.append(mk("span", "", hostOf(x.media.href)), mk("span", "", fromLabel(x)));
             cap.appendChild(meta);
         }
 
         const acts = mk("div", "pb-acts mono");
-        if (x.kind === "unsplash") acts.append(actButton("locate", "Locate ◎", "Locate"), extLink(utmLink(x.photo.links.html), "Unsplash ↗", "Open"));
+        if (x.kind === "unsplash") acts.append(actButton("locate", "Locate ◎", "Locate"), extLink(photoPage(x.photo), isLibrary(x.photo) ? "Aperture ↗" : "Unsplash ↗", "Open"));
         else if (x.kind === "link") acts.append(extLink(x.media.href, "Open ↗", "Open"), mk("span"));
         else if (x.kind === "note") acts.append(actButton("tint", "Colour ◐", "Colour", "Change note colour"), mk("span"));
         else acts.append(mk("span"), mk("span"));
@@ -2728,7 +2735,7 @@
             img.alt = "";
             img.loading = "lazy";
             img.draggable = false;
-            img.src = `${p.urls.raw}&w=160&h=200&fit=crop&crop=entropy&q=60&auto=format`;
+            img.src = photoSrc(p, { w: 160, h: 200, fit: "crop", crop: "entropy", q: 60, auto: "format" });
             b.appendChild(img);
             li.appendChild(b);
             trayList.appendChild(li);
@@ -3038,7 +3045,7 @@
         const sources = (
             await Promise.all(
                 items.map(async (x) => {
-                    if (x.kind === "unsplash") return { src: `${x.photo.urls.raw}&w=60&h=75&fit=crop&q=50&auto=format`, cors: true };
+                    if (x.kind === "unsplash") return { src: photoSrc(x.photo, { w: 60, h: 75, fit: "crop", q: 50, auto: "format" }), cors: true };
                     if (x.kind === "upload") return { src: await window.media?.url(x.id), cors: false };
                     return { src: x.media.src, cors: true };
                 })
@@ -3277,7 +3284,7 @@
             i: items.map((x) => {
                 if (x.kind === "unsplash") {
                     const p = x.photo;
-                    return ["s", p.id, p.urls.raw.slice(HOST.length), p.color, p.width, p.height, p.user.name, p.user.username, p.alt_description.slice(0, 120), x.note, ...pos(x), x.query];
+                    return ["s", p.id, p.urls.raw.startsWith(HOST) ? p.urls.raw.slice(HOST.length) : p.urls.raw, p.color, p.width, p.height, p.user.name, p.user.username, p.alt_description.slice(0, 120), x.note, ...pos(x), x.query];
                 }
                 if (x.kind === "link") return ["l", x.id, x.media.href, x.media.src || "", x.media.title, x.note, ...pos(x)];
                 return ["n", x.id, x.note, x.tint, ...pos(x)];
@@ -3290,7 +3297,7 @@
 
     const unsplashFromArr = (a) => ({
         kind: "unsplash",
-        photo: { id: a[1], urls: { raw: HOST + str(a[2], 600) }, color: a[3], width: a[4], height: a[5], user: { name: a[6], username: a[7] }, alt_description: a[8] },
+        photo: { id: a[1], urls: { raw: /^https:\/\//.test(a[2]) ? str(a[2], 600) : HOST + str(a[2], 600) }, color: a[3], width: a[4], height: a[5], user: { name: a[6], username: a[7] }, alt_description: a[8] },
         note: a[9],
         bx: a[10],
         by: a[11],
@@ -3873,7 +3880,7 @@
             ctx.textBaseline = "alphabetic";
             ctx.font = `12px ${mono}`;
             ctx.fillStyle = "rgba(236, 231, 220, 0.5)";
-            const hasUnsplash = B.pins.some((x) => x.kind === "unsplash");
+            const hasUnsplash = B.pins.some((x) => x.kind === "unsplash" && !isLibrary(x.photo));
             ctx.fillText(`${B.name.toUpperCase()} — APERTURE${hasUnsplash ? " · PHOTOS FROM UNSPLASH" : ""}`, pad, H - 28);
 
             let blob;
@@ -3884,7 +3891,7 @@
             }
             if (!blob) throw new Error("toBlob failed");
             download(blob, `aperture-${slug(B.name)}.png`);
-            trackDownloads(B.pins.filter((x) => x.kind === "unsplash"));
+            trackDownloads(B.pins.filter((x) => x.kind === "unsplash" && !isLibrary(x.photo)));
             toast("Image saved");
         } catch (err) {
             window.reportProblem?.("image export failed", err);
